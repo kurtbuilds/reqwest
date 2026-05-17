@@ -12,6 +12,8 @@
 //! error or low-level protocol NACK is encountered that is known to be safe to
 //! retry. Note however that providing a specific retry policy will override
 //! the default, and you will need to explicitly include that behavior.
+//! HTTP response status retries can be added to a policy with
+//! [`Builder::retry_on_status()`] or [`Builder::retry_on_statuses()`].
 //!
 //! All policies default to including a retry budget that permits 20% extra
 //! requests to be sent.
@@ -163,6 +165,61 @@ impl Builder {
         self
     }
 
+    /// Retry requests that fail with a low-level protocol NACK.
+    ///
+    /// This is the default behavior when no custom retry policy is configured.
+    /// Use this method to include that behavior in an explicit policy.
+    pub fn retry_on_protocol_nacks(mut self) -> Self {
+        self.classifier = self
+            .classifier
+            .or(classify::Classifier::ProtocolNacks);
+        self
+    }
+
+    /// Retry responses with this HTTP status code.
+    ///
+    /// This adds to any previously configured retry classifiers. Status-code
+    /// retries apply to every request in the policy's scope, so prefer
+    /// [`classify_fn()`] when retrying the same request twice may not be safe
+    /// for all methods.
+    ///
+    /// [`classify_fn()`]: Self::classify_fn()
+    pub fn retry_on_status(self, status: http::StatusCode) -> Self {
+        self.retry_on_statuses([status])
+    }
+
+    /// Retry responses with any of these HTTP status codes.
+    ///
+    /// This adds to any previously configured retry classifiers. Status-code
+    /// retries apply to every request in the policy's scope, so prefer
+    /// [`classify_fn()`] when retrying the same request twice may not be safe
+    /// for all methods.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # fn with_builder(builder: reqwest::retry::Builder) -> reqwest::retry::Builder {
+    /// builder.retry_on_statuses([
+    ///     http::StatusCode::TOO_MANY_REQUESTS,
+    ///     http::StatusCode::SERVICE_UNAVAILABLE,
+    /// ])
+    /// # }
+    /// ```
+    ///
+    /// [`classify_fn()`]: Self::classify_fn()
+    pub fn retry_on_statuses<I>(mut self, statuses: I) -> Self
+    where
+        I: IntoIterator<Item = http::StatusCode>,
+    {
+        let statuses: Vec<_> = statuses.into_iter().collect();
+        if !statuses.is_empty() {
+            self.classifier = self
+                .classifier
+                .or(classify::Classifier::StatusCodes(statuses.into()));
+        }
+        self
+    }
+
     /// Provide a classifier to determine if a request should be retried.
     ///
     /// # Example
@@ -251,7 +308,7 @@ impl<B> tower::retry::Policy<Req, http::Response<B>, crate::Error> for Policy {
     }
 
     fn clone_request(&mut self, req: &Req) -> Option<Req> {
-        if self.retry_cnt > 0 && !self.scope.applies_to(req) {
+        if !self.scope.applies_to(req) {
             return None;
         }
         if self.retry_cnt >= self.max_retries_per_request {
@@ -442,6 +499,12 @@ mod classify {
                 .map(|&e| super::is_retryable_error(e))
                 .unwrap_or(false)
         }
+
+        fn is_status_code(&self, statuses: &[http::StatusCode]) -> bool {
+            self.status()
+                .map(|status| statuses.contains(&status))
+                .unwrap_or(false)
+        }
     }
 
     #[must_use]
@@ -455,10 +518,32 @@ mod classify {
     pub(super) enum Classifier {
         Never,
         ProtocolNacks,
+        StatusCodes(std::sync::Arc<[http::StatusCode]>),
         Dyn(std::sync::Arc<dyn Classify>),
+        Any(Vec<Classifier>),
     }
 
     impl Classifier {
+        pub(super) fn or(self, other: Self) -> Self {
+            match (self, other) {
+                (Self::Never, other) => other,
+                (this, Self::Never) => this,
+                (Self::Any(mut all), Self::Any(mut other)) => {
+                    all.append(&mut other);
+                    Self::Any(all)
+                }
+                (Self::Any(mut all), other) => {
+                    all.push(other);
+                    Self::Any(all)
+                }
+                (this, Self::Any(mut other)) => {
+                    other.insert(0, this);
+                    Self::Any(other)
+                }
+                (this, other) => Self::Any(vec![this, other]),
+            }
+        }
+
         pub(super) fn classify<B>(
             &self,
             req: &super::Req,
@@ -474,7 +559,22 @@ mod classify {
                         Action::Success
                     }
                 }
+                Self::StatusCodes(statuses) => {
+                    if req_rep.is_status_code(statuses) {
+                        Action::Retryable
+                    } else {
+                        Action::Success
+                    }
+                }
                 Self::Dyn(c) => c.classify(req_rep),
+                Self::Any(classifiers) => {
+                    for classifier in classifiers {
+                        if let Action::Retryable = classifier.classify(req, res) {
+                            return Action::Retryable;
+                        }
+                    }
+                    Action::Success
+                }
             }
         }
     }
@@ -484,7 +584,9 @@ mod classify {
             match self {
                 Self::Never => f.write_str("Never"),
                 Self::ProtocolNacks => f.write_str("ProtocolNacks"),
+                Self::StatusCodes(_) => f.write_str("StatusCodes"),
                 Self::Dyn(_) => f.write_str("Classifier"),
+                Self::Any(classifiers) => f.debug_tuple("Any").field(classifiers).finish(),
             }
         }
     }

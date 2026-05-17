@@ -7,6 +7,109 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[tokio::test]
+async fn status_retries_are_opt_in() {
+    let _ = env_logger::try_init();
+    let cnt = Arc::new(AtomicUsize::new(0));
+    let seen = cnt.clone();
+    let server = server::http(move |_req| {
+        let cnt = cnt.clone();
+        async move {
+            if cnt.fetch_add(1, Ordering::Relaxed) == 0 {
+                http::Response::builder()
+                    .status(http::StatusCode::SERVICE_UNAVAILABLE)
+                    .body(Default::default())
+                    .unwrap()
+            } else {
+                http::Response::default()
+            }
+        }
+    });
+
+    let url = format!("http://{}", server.addr());
+    let resp = reqwest::Client::builder()
+        .build()
+        .unwrap()
+        .get(url)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(seen.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn retries_matching_status() {
+    let _ = env_logger::try_init();
+    let cnt = Arc::new(AtomicUsize::new(0));
+    let server = server::http(move |_req| {
+        let cnt = cnt.clone();
+        async move {
+            if cnt.fetch_add(1, Ordering::Relaxed) == 0 {
+                http::Response::builder()
+                    .status(http::StatusCode::SERVICE_UNAVAILABLE)
+                    .body(Default::default())
+                    .unwrap()
+            } else {
+                http::Response::default()
+            }
+        }
+    });
+
+    let scope = server.addr().ip().to_string();
+    let retries =
+        reqwest::retry::for_host(scope).retry_on_status(http::StatusCode::SERVICE_UNAVAILABLE);
+
+    let url = format!("http://{}", server.addr());
+    let resp = reqwest::Client::builder()
+        .retry(retries)
+        .build()
+        .unwrap()
+        .get(url)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), http::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn status_retries_apply_only_in_scope() {
+    let _ = env_logger::try_init();
+    let cnt = Arc::new(AtomicUsize::new(0));
+    let seen = cnt.clone();
+    let server = server::http(move |_req| {
+        let cnt = cnt.clone();
+        async move {
+            if cnt.fetch_add(1, Ordering::Relaxed) == 0 {
+                http::Response::builder()
+                    .status(http::StatusCode::SERVICE_UNAVAILABLE)
+                    .body(Default::default())
+                    .unwrap()
+            } else {
+                http::Response::default()
+            }
+        }
+    });
+
+    let retries = reqwest::retry::for_host("example.com")
+        .retry_on_status(http::StatusCode::SERVICE_UNAVAILABLE);
+
+    let url = format!("http://{}", server.addr());
+    let resp = reqwest::Client::builder()
+        .retry(retries)
+        .build()
+        .unwrap()
+        .get(url)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(seen.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn retries_apply_in_scope() {
     let _ = env_logger::try_init();
     let cnt = Arc::new(AtomicUsize::new(0));
