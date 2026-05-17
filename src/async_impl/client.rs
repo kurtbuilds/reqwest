@@ -181,7 +181,7 @@ struct Config {
     #[cfg(any(feature = "__native-tls", feature = "__rustls"))]
     identity: Option<Identity>,
     proxies: Vec<ProxyMatcher>,
-    auto_sys_proxy: bool,
+    auto_env_proxy: bool,
     redirect_policy: redirect::Policy,
     retry_policy: crate::retry::Builder,
     referer: bool,
@@ -306,7 +306,7 @@ impl ClientBuilder {
                 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
                 tcp_user_timeout: Some(Duration::from_secs(30)),
                 proxies: Vec::new(),
-                auto_sys_proxy: true,
+                auto_env_proxy: false,
                 redirect_policy: redirect::Policy::default(),
                 retry_policy: crate::retry::Builder::default(),
                 referer: true,
@@ -412,7 +412,7 @@ impl ClientBuilder {
         }
 
         let mut proxies = config.proxies;
-        if config.auto_sys_proxy {
+        if config.auto_env_proxy {
             proxies.push(ProxyMatcher::system());
         }
         let proxies = Arc::new(proxies);
@@ -1412,10 +1412,25 @@ impl ClientBuilder {
     ///
     /// # Note
     ///
-    /// Adding a proxy will disable the automatic usage of the "system" proxy.
+    /// Adding a proxy will disable the automatic usage of proxy configuration
+    /// from the environment.
     pub fn proxy(mut self, proxy: Proxy) -> ClientBuilder {
         self.config.proxies.push(proxy.into_matcher());
-        self.config.auto_sys_proxy = false;
+        self.config.auto_env_proxy = false;
+        self
+    }
+
+    /// Use proxy configuration from environment variables.
+    ///
+    /// This checks for values in `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and
+    /// `NO_PROXY`, as well as lowercase variants. If the `system-proxy` feature
+    /// is enabled, this also checks macOS and Windows system proxy settings when
+    /// environment variables are not set.
+    ///
+    /// By default, a `Client` does not use proxy configuration from the
+    /// environment.
+    pub fn env_config_proxy(mut self) -> ClientBuilder {
+        self.config.auto_env_proxy = true;
         self
     }
 
@@ -1425,10 +1440,11 @@ impl ClientBuilder {
     /// To add a proxy exclusion list, use [crate::proxy::Proxy::no_proxy()]
     /// on all desired proxies instead.
     ///
-    /// This also disables the automatic usage of the "system" proxy.
+    /// This also disables the automatic usage of proxy configuration from the
+    /// environment.
     pub fn no_proxy(mut self) -> ClientBuilder {
         self.config.proxies.clear();
-        self.config.auto_sys_proxy = false;
+        self.config.auto_env_proxy = false;
         self
     }
 

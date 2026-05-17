@@ -362,9 +362,23 @@ impl ClientBuilder {
     ///
     /// # Note
     ///
-    /// Adding a proxy will disable the automatic usage of the "system" proxy.
+    /// Adding a proxy will disable the automatic usage of proxy configuration
+    /// from the environment.
     pub fn proxy(self, proxy: Proxy) -> ClientBuilder {
         self.with_inner(move |inner| inner.proxy(proxy))
+    }
+
+    /// Use proxy configuration from environment variables.
+    ///
+    /// This checks for values in `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and
+    /// `NO_PROXY`, as well as lowercase variants. If the `system-proxy` feature
+    /// is enabled, this also checks macOS and Windows system proxy settings when
+    /// environment variables are not set.
+    ///
+    /// By default, a `Client` does not use proxy configuration from the
+    /// environment.
+    pub fn env_config_proxy(self) -> ClientBuilder {
+        self.with_inner(move |inner| inner.env_config_proxy())
     }
 
     /// Clear all `Proxies`, so `Client` will use no proxy anymore.
@@ -373,7 +387,8 @@ impl ClientBuilder {
     /// To add a proxy exclusion list, use [Proxy::no_proxy()]
     /// on all desired proxies instead.
     ///
-    /// This also disables the automatic usage of the "system" proxy.
+    /// This also disables the automatic usage of proxy configuration from the
+    /// environment.
     pub fn no_proxy(self) -> ClientBuilder {
         self.with_inner(move |inner| inner.no_proxy())
     }

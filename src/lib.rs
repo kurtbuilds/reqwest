@@ -141,9 +141,12 @@
 //!
 //! ## Proxies
 //!
-//! **NOTE**: System proxies are enabled by default.
+//! By default, a `Client` does not use proxy configuration from the environment.
+//! To use proxy environment variables, call
+//! [`ClientBuilder::env_config_proxy()`].
 //!
-//! System proxies look in environment variables to set HTTP or HTTPS proxies.
+//! Proxy environment configuration looks in environment variables to set HTTP or
+//! HTTPS proxies.
 //!
 //! `HTTP_PROXY` or `http_proxy` provide HTTP proxies for HTTP connections while
 //! `HTTPS_PROXY` or `https_proxy` provide HTTPS proxies for HTTPS connections.
@@ -154,6 +157,9 @@
 //! These can be overwritten by adding a [`Proxy`] to `ClientBuilder`
 //! i.e. `let proxy = reqwest::Proxy::http("https://secure.example")?;`
 //! or disabled by calling `ClientBuilder::no_proxy()`.
+//! If the `system-proxy` feature is enabled, `env_config_proxy()` also checks
+//! macOS and Windows system proxy settings when environment variables are not
+//! set.
 //!
 //! `socks` feature is required if you have configured socks proxy like this:
 //!
@@ -213,8 +219,9 @@
 //! - **socks**: Provides SOCKS5 proxy support.
 //! - **hickory-dns**: Enables a hickory-dns async resolver instead of default
 //!   threadpool using `getaddrinfo`.
-//! - **system-proxy** *(enabled by default)*: Use Windows and macOS system
-//!   proxy settings automatically.
+//! - **system-proxy** *(enabled by default)*: Allow
+//!   [`ClientBuilder::env_config_proxy()`] to use Windows and macOS system
+//!   proxy settings when environment variables are not set.
 //!
 //! ## Unstable Features
 //!

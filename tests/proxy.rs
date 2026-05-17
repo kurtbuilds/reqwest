@@ -4,12 +4,56 @@ mod support;
 use support::server;
 
 use std::env;
+use std::ffi::OsString;
 
 use std::sync::LazyLock;
 use tokio::sync::Mutex;
 
 // serialize tests that read from / write to environment variables
 static HTTP_PROXY_ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+struct EnvVarGuard {
+    previous: Vec<(&'static str, Option<OsString>)>,
+}
+
+impl EnvVarGuard {
+    fn set(vars: Vec<(&'static str, Option<String>)>) -> EnvVarGuard {
+        let previous = vars
+            .iter()
+            .map(|(name, _)| (*name, env::var_os(name)))
+            .collect();
+
+        for (name, value) in vars {
+            match value {
+                Some(value) => env::set_var(name, value),
+                None => env::remove_var(name),
+            }
+        }
+
+        EnvVarGuard { previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        for (name, value) in self.previous.drain(..) {
+            match value {
+                Some(value) => env::set_var(name, value),
+                None => env::remove_var(name),
+            }
+        }
+    }
+}
+
+fn http_proxy_env(proxy: String) -> EnvVarGuard {
+    EnvVarGuard::set(vec![
+        ("HTTP_PROXY", Some(proxy.clone())),
+        ("http_proxy", Some(proxy)),
+        ("NO_PROXY", Some(String::new())),
+        ("no_proxy", Some(String::new())),
+        ("REQUEST_METHOD", None),
+    ])
+}
 
 #[tokio::test]
 async fn http_proxy() {
@@ -119,16 +163,11 @@ async fn system_http_proxy_basic_auth_parsed() {
     // avoid races with other tests that change "http_proxy"
     let _env_lock = HTTP_PROXY_ENV_MUTEX.lock().await;
 
-    // save system setting first.
-    let system_proxy = env::var("http_proxy");
-
     // set-up http proxy.
-    env::set_var(
-        "http_proxy",
-        format!("http://Aladdin:opensesame@{}", server.addr()),
-    );
+    let _env = http_proxy_env(format!("http://Aladdin:opensesame@{}", server.addr()));
 
     let res = reqwest::Client::builder()
+        .env_config_proxy()
         .build()
         .unwrap()
         .get(url)
@@ -138,12 +177,6 @@ async fn system_http_proxy_basic_auth_parsed() {
 
     assert_eq!(res.url().as_str(), url);
     assert_eq!(res.status(), reqwest::StatusCode::OK);
-
-    // reset user setting.
-    match system_proxy {
-        Err(_) => env::remove_var("http_proxy"),
-        Ok(proxy) => env::set_var("http_proxy", proxy),
-    }
 }
 
 #[tokio::test]
@@ -208,7 +241,32 @@ async fn test_custom_headers() {
 }
 
 #[tokio::test]
-async fn test_using_system_proxy() {
+async fn test_proxy_env_is_opt_in() {
+    let origin = server::http(move |req| {
+        assert_eq!(req.method(), "GET");
+        assert_eq!(req.uri(), "/direct");
+
+        async { http::Response::default() }
+    });
+
+    let proxy =
+        server::http(move |_| async { panic!("environment proxy should not be used by default") });
+
+    // avoid races with other tests that change "http_proxy"
+    let _env_lock = HTTP_PROXY_ENV_MUTEX.lock().await;
+
+    // set-up http proxy.
+    let _env = http_proxy_env(format!("http://{}", proxy.addr()));
+
+    let url = format!("http://{}/direct", origin.addr());
+    let res = reqwest::get(&url).await.unwrap();
+
+    assert_eq!(res.url().as_str(), &url);
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_using_env_config_proxy() {
     let url = "http://not.a.real.sub.hyper.rs.local/prox";
     let server = server::http(move |req| {
         assert_eq!(req.method(), "GET");
@@ -221,22 +279,21 @@ async fn test_using_system_proxy() {
     // avoid races with other tests that change "http_proxy"
     let _env_lock = HTTP_PROXY_ENV_MUTEX.lock().await;
 
-    // save system setting first.
-    let system_proxy = env::var("http_proxy");
     // set-up http proxy.
-    env::set_var("http_proxy", format!("http://{}", server.addr()));
+    let _env = http_proxy_env(format!("http://{}", server.addr()));
 
-    // system proxy is used by default
-    let res = reqwest::get(url).await.unwrap();
+    // environment proxy is used when configured
+    let res = reqwest::Client::builder()
+        .env_config_proxy()
+        .build()
+        .unwrap()
+        .get(url)
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(res.url().as_str(), url);
     assert_eq!(res.status(), reqwest::StatusCode::OK);
-
-    // reset user setting.
-    match system_proxy {
-        Err(_) => env::remove_var("http_proxy"),
-        Ok(proxy) => env::set_var("http_proxy", proxy),
-    }
 }
 
 #[tokio::test]
