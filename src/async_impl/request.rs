@@ -1,6 +1,7 @@
 use std::convert::TryFrom;
 use std::fmt;
-use std::future::Future;
+use std::future::{Future, IntoFuture};
+use std::pin::Pin;
 use std::time::Duration;
 
 #[cfg(any(feature = "query", feature = "form", feature = "json"))]
@@ -549,6 +550,15 @@ impl RequestBuilder {
                 client: self.client.clone(),
                 request: Ok(req),
             })
+    }
+}
+
+impl IntoFuture for RequestBuilder {
+    type Output = Result<Response, crate::Error>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(async move { self.send().await?.error_for_status() })
     }
 }
 
