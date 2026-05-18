@@ -383,6 +383,7 @@ if_hyper! {
     #[cfg(feature = "cookies")]
     pub mod cookie;
     pub mod dns;
+    pub mod logging;
     mod proxy;
     pub mod redirect;
     pub mod retry;

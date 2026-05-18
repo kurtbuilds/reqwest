@@ -184,6 +184,7 @@ struct Config {
     auto_env_proxy: bool,
     redirect_policy: redirect::Policy,
     retry_policy: crate::retry::Builder,
+    request_logger: Option<crate::logging::Logger>,
     referer: bool,
     read_timeout: Option<Duration>,
     timeout: Option<Duration>,
@@ -309,6 +310,7 @@ impl ClientBuilder {
                 auto_env_proxy: false,
                 redirect_policy: redirect::Policy::default(),
                 retry_policy: crate::retry::Builder::default(),
+                request_logger: None,
                 referer: true,
                 read_timeout: None,
                 timeout: None,
@@ -1047,6 +1049,7 @@ impl ClientBuilder {
         let hyper = hyper.zstd(config.accepts.zstd);
         #[cfg(feature = "deflate")]
         let hyper = hyper.deflate(config.accepts.deflate);
+        let hyper = crate::logging::LoggerService::new(hyper, config.request_logger.clone());
 
         Ok(Client {
             inner: Arc::new(ClientRef {
@@ -1084,6 +1087,7 @@ impl ClientBuilder {
                         let svc = svc.zstd(config.accepts.zstd);
                         #[cfg(feature = "deflate")]
                         let svc = svc.deflate(config.accepts.deflate);
+                        let svc = crate::logging::LoggerService::new(svc, config.request_logger);
                         Some(svc)
                     }
                     None => None,
@@ -1403,6 +1407,15 @@ impl ClientBuilder {
     // XXX: accept an `impl retry::IntoPolicy` instead?
     pub fn retry(mut self, policy: crate::retry::Builder) -> ClientBuilder {
         self.config.retry_policy = policy;
+        self
+    }
+
+    /// Set a request and response logger.
+    ///
+    /// Logging is disabled by default. The default logger writes request and
+    /// response lines and headers to stdout.
+    pub fn request_logger(mut self, logger: crate::logging::Logger) -> ClientBuilder {
+        self.config.request_logger = Some(logger);
         self
     }
 
@@ -2809,6 +2822,10 @@ impl Config {
             f.field("redirect_policy", &self.redirect_policy);
         }
 
+        if let Some(ref logger) = self.request_logger {
+            f.field("request_logger", logger);
+        }
+
         if self.referer {
             f.field("referer", &true);
         }
@@ -2948,11 +2965,11 @@ type MaybeDecompression<T> = T;
 ))]
 type MaybeDecompression<T> = Decompression<T>;
 
-type LayeredService<T> = MaybeDecompression<
-    FollowRedirect<
+type LayeredService<T> = crate::logging::LoggerService<
+    MaybeDecompression<FollowRedirect<
         MaybeCookieService<tower::retry::Retry<crate::retry::Policy, T>>,
         TowerRedirectPolicy,
-    >,
+    >>,
 >;
 type LayeredFuture<T> = <LayeredService<T> as Service<http::Request<Body>>>::Future;
 

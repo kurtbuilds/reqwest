@@ -243,6 +243,10 @@ name = "simple"
 path = "examples/simple.rs"
 
 [[example]]
+name = "request_logging"
+path = "examples/request_logging.rs"
+
+[[example]]
 name = "h3_simple"
 path = "examples/h3_simple.rs"
 required-features = ["http3", "rustls"]

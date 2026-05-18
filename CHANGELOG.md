@@ -8,6 +8,7 @@
 - Fix HTTP/3 connection establishment picking IPv4 and IPv6.
 - Upgrade rustls-platform-verifier.
 - Add retry policy helpers for HTTP status-code retries.
+- Add request and response logging support.
 - (wasm) Only use wasm-bindgen on unknown-* targets.
 
 ## v0.13.2

@@ -349,6 +349,14 @@ impl ClientBuilder {
         self.with_inner(move |inner| inner.retry(policy))
     }
 
+    /// Set a request and response logger.
+    ///
+    /// Logging is disabled by default. The default logger writes request and
+    /// response lines and headers to stdout.
+    pub fn request_logger(self, logger: crate::logging::Logger) -> ClientBuilder {
+        self.with_inner(move |inner| inner.request_logger(logger))
+    }
+
     /// Enable or disable automatic setting of the `Referer` header.
     ///
     /// Default is `true`.
