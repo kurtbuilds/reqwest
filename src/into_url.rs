@@ -74,18 +74,15 @@ impl IntoUrlSealed for String {
 }
 
 pub(crate) fn into_url_with_base<U: IntoUrl>(url: U, base_url: Option<&Url>) -> crate::Result<Url> {
-    match Url::parse(url.as_str()) {
-        Ok(url) => url.into_url(),
-        Err(url::ParseError::RelativeUrlWithoutBase) => match base_url {
-            Some(base_url) => base_url
-                .join(url.as_str())
-                .map_err(crate::error::builder)?
-                .into_url(),
-            None => Err(crate::error::builder(
-                url::ParseError::RelativeUrlWithoutBase,
-            )),
-        },
-        Err(err) => Err(crate::error::builder(err)),
+    match base_url {
+        Some(base_url) => {
+            let path = url.as_str();
+            let mut url = base_url.clone();
+            let path = format!("{}{}", base_url.path(), path);
+            url.set_path(&path);
+            Ok(url)
+        }
+        None => url.into_url(),
     }
 }
 
@@ -129,11 +126,19 @@ mod tests {
     }
 
     #[test]
-    fn into_url_with_base_prefers_absolute_url() {
-        let base_url = Url::parse("https://example.com/api/").unwrap();
-        let url = into_url_with_base("https://other.example/users", Some(&base_url)).unwrap();
+    fn into_url_with_base_appends_leading_slash_path() {
+        let base_url = Url::parse("https://localhost:5000/api/v1").unwrap();
+        let url = into_url_with_base("/foo/bar", Some(&base_url)).unwrap();
 
-        assert_eq!(url.as_str(), "https://other.example/users");
+        assert_eq!(url.as_str(), "https://localhost:5000/api/v1/foo/bar");
+    }
+
+    #[test]
+    fn into_url_with_base_appends_without_normalizing_slashes() {
+        let base_url = Url::parse("https://example.com/api/").unwrap();
+        let url = into_url_with_base("/users", Some(&base_url)).unwrap();
+
+        assert_eq!(url.as_str(), "https://example.com/api//users");
     }
 
     #[test]

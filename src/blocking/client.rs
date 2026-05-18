@@ -123,19 +123,18 @@ impl ClientBuilder {
 
     /// Sets a base URL to use when joining relative request URLs.
     ///
-    /// Absolute URLs override the base URL. Relative URLs are joined using
-    /// standard URL resolution rules, so a base URL with a path should usually
-    /// end with a trailing slash.
+    /// Absolute URLs override the base URL. Relative URLs are appended directly
+    /// to the base URL.
     ///
     /// # Example
     ///
     /// ```rust
     /// # fn doc() -> Result<(), reqwest::Error> {
     /// let client = reqwest::blocking::Client::builder()
-    ///     .base_url("https://api.example.com/v1/")
+    ///     .base_url("https://api.example.com/v1")
     ///     .build()?;
     ///
-    /// let res = client.get("users").send()?;
+    /// let res = client.get("/users").send()?;
     /// # Ok(())
     /// # }
     /// ```

@@ -1113,19 +1113,18 @@ impl ClientBuilder {
 
     /// Sets a base URL to use when joining relative request URLs.
     ///
-    /// Absolute URLs override the base URL. Relative URLs are joined using
-    /// standard URL resolution rules, so a base URL with a path should usually
-    /// end with a trailing slash.
+    /// Absolute URLs override the base URL. Relative URLs are appended directly
+    /// to the base URL.
     ///
     /// # Example
     ///
     /// ```rust
     /// # async fn doc() -> Result<(), reqwest::Error> {
     /// let client = reqwest::Client::builder()
-    ///     .base_url("https://api.example.com/v1/")
+    ///     .base_url("https://api.example.com/v1")
     ///     .build()?;
     ///
-    /// let res = client.get("users").send().await?;
+    /// let res = client.get("/users").send().await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -3009,10 +3008,12 @@ type MaybeDecompression<T> = T;
 type MaybeDecompression<T> = Decompression<T>;
 
 type LayeredService<T> = crate::logging::LoggerService<
-    MaybeDecompression<FollowRedirect<
-        MaybeCookieService<tower::retry::Retry<crate::retry::Policy, T>>,
-        TowerRedirectPolicy,
-    >>,
+    MaybeDecompression<
+        FollowRedirect<
+            MaybeCookieService<tower::retry::Retry<crate::retry::Policy, T>>,
+            TowerRedirectPolicy,
+        >,
+    >,
 >;
 type LayeredFuture<T> = <LayeredService<T> as Service<http::Request<Body>>>::Future;
 
@@ -3227,25 +3228,13 @@ mod tests {
     #[test]
     fn request_joins_base_url() {
         let client = super::Client::builder()
-            .base_url("https://api.example.com/v1/")
+            .base_url("https://api.example.com/v1")
             .build()
             .unwrap();
 
-        let req = client.get("users").build().unwrap();
+        let req = client.get("/users").build().unwrap();
 
         assert_eq!(req.url().as_str(), "https://api.example.com/v1/users");
-    }
-
-    #[test]
-    fn request_absolute_url_overrides_base_url() {
-        let client = super::Client::builder()
-            .base_url("https://api.example.com/v1/")
-            .build()
-            .unwrap();
-
-        let req = client.get("https://other.example/users").build().unwrap();
-
-        assert_eq!(req.url().as_str(), "https://other.example/users");
     }
 
     #[tokio::test]

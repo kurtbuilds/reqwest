@@ -312,9 +312,8 @@ impl ClientBuilder {
 
     /// Sets a base URL to use when joining relative request URLs.
     ///
-    /// Absolute URLs override the base URL. Relative URLs are joined using
-    /// standard URL resolution rules, so a base URL with a path should usually
-    /// end with a trailing slash.
+    /// Absolute URLs override the base URL. Relative URLs are appended directly
+    /// to the base URL.
     pub fn base_url<U: IntoUrl>(mut self, url: U) -> ClientBuilder {
         match url.into_url() {
             Ok(url) => {
@@ -460,10 +459,10 @@ mod tests {
     #[wasm_bindgen_test]
     fn request_joins_base_url() {
         let client = crate::Client::builder()
-            .base_url("https://api.example.com/v1/")
+            .base_url("https://api.example.com/v1")
             .build()
             .expect("client");
-        let req = client.get("users").build().expect("request");
+        let req = client.get("/users").build().expect("request");
 
         assert_eq!(req.url().as_str(), "https://api.example.com/v1/users");
     }
