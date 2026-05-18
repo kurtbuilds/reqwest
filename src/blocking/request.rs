@@ -712,6 +712,18 @@ mod tests {
     }
 
     #[test]
+    fn request_joins_base_url() {
+        let client = Client::builder()
+            .base_url("https://api.example.com/v1/")
+            .build()
+            .unwrap();
+        let r = client.get("users").build().unwrap();
+
+        assert_eq!(r.method(), &Method::GET);
+        assert_eq!(r.url().as_str(), "https://api.example.com/v1/users");
+    }
+
+    #[test]
     fn basic_head_request() {
         let client = Client::new();
         let some_url = "https://google.com/";

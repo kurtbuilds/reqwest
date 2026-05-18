@@ -8,6 +8,7 @@ use wasm_bindgen::prelude::{wasm_bindgen, UnwrapThrowExt as _};
 use wasm_bindgen::JsCast;
 
 use super::{AbortGuard, Request, RequestBuilder, Response};
+use crate::into_url::into_url_with_base;
 use crate::IntoUrl;
 
 #[wasm_bindgen]
@@ -122,7 +123,8 @@ impl Client {
     ///
     /// This method fails whenever supplied `Url` cannot be parsed.
     pub fn request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
-        let req = url.into_url().map(move |url| Request::new(method, url));
+        let req = into_url_with_base(url, self.config.base_url.as_ref())
+            .map(move |url| Request::new(method, url));
         RequestBuilder::new(self.clone(), req)
     }
 
@@ -308,6 +310,23 @@ impl ClientBuilder {
         })
     }
 
+    /// Sets a base URL to use when joining relative request URLs.
+    ///
+    /// Absolute URLs override the base URL. Relative URLs are joined using
+    /// standard URL resolution rules, so a base URL with a path should usually
+    /// end with a trailing slash.
+    pub fn base_url<U: IntoUrl>(mut self, url: U) -> ClientBuilder {
+        match url.into_url() {
+            Ok(url) => {
+                self.config.base_url = Some(url);
+            }
+            Err(err) => {
+                self.config.error = Some(err);
+            }
+        }
+        self
+    }
+
     /// Sets the `User-Agent` header to be used by this client.
     pub fn user_agent<V>(mut self, value: V) -> ClientBuilder
     where
@@ -343,6 +362,7 @@ impl Default for ClientBuilder {
 #[derive(Debug)]
 struct Config {
     headers: HeaderMap,
+    base_url: Option<Url>,
     error: Option<crate::Error>,
 }
 
@@ -350,6 +370,7 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             headers: HeaderMap::new(),
+            base_url: None,
             error: None,
         }
     }
@@ -357,6 +378,10 @@ impl Default for Config {
 
 impl Config {
     fn fmt_fields(&self, f: &mut fmt::DebugStruct<'_, '_>) {
+        if let Some(ref url) = self.base_url {
+            f.field("base_url", url);
+        }
+
         f.field("default_headers", &self.headers);
     }
 }
@@ -430,6 +455,17 @@ mod tests {
             "application/json",
             "request headers don't change client defaults"
         );
+    }
+
+    #[wasm_bindgen_test]
+    fn request_joins_base_url() {
+        let client = crate::Client::builder()
+            .base_url("https://api.example.com/v1/")
+            .build()
+            .expect("client");
+        let req = client.get("users").build().expect("request");
+
+        assert_eq!(req.url().as_str(), "https://api.example.com/v1/users");
     }
 
     #[wasm_bindgen_test]

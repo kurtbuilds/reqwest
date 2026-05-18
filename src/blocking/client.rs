@@ -25,6 +25,7 @@ use crate::connect::uds::UnixSocketProvider;
 use crate::connect::BoxedConnectorService;
 use crate::dns::Resolve;
 use crate::error::BoxError;
+use crate::into_url::into_url_with_base;
 #[cfg(feature = "__tls")]
 use crate::tls;
 #[cfg(feature = "__rustls")]
@@ -33,7 +34,7 @@ use crate::tls::CertificateRevocationList;
 use crate::Certificate;
 #[cfg(any(feature = "__native-tls", feature = "__rustls"))]
 use crate::Identity;
-use crate::{async_impl, header, redirect, IntoUrl, Method, Proxy};
+use crate::{async_impl, header, redirect, IntoUrl, Method, Proxy, Url};
 
 /// A `Client` to make Requests with.
 ///
@@ -80,6 +81,7 @@ pub struct Client {
 pub struct ClientBuilder {
     inner: async_impl::ClientBuilder,
     timeout: Timeout,
+    base_url: Option<Url>,
 }
 
 impl Default for ClientBuilder {
@@ -96,6 +98,7 @@ impl ClientBuilder {
         ClientBuilder {
             inner: async_impl::ClientBuilder::new(),
             timeout: Timeout::default(),
+            base_url: None,
         }
     }
 }
@@ -117,6 +120,31 @@ impl ClientBuilder {
     }
 
     // Higher-level options
+
+    /// Sets a base URL to use when joining relative request URLs.
+    ///
+    /// Absolute URLs override the base URL. Relative URLs are joined using
+    /// standard URL resolution rules, so a base URL with a path should usually
+    /// end with a trailing slash.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # fn doc() -> Result<(), reqwest::Error> {
+    /// let client = reqwest::blocking::Client::builder()
+    ///     .base_url("https://api.example.com/v1/")
+    ///     .build()?;
+    ///
+    /// let res = client.get("users").send()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn base_url<U: IntoUrl>(self, url: U) -> ClientBuilder {
+        let base_url = url.as_str().to_owned();
+        let mut builder = self.with_inner(move |inner| inner.base_url(url));
+        builder.base_url = into_url_with_base(base_url.as_str(), None).ok();
+        builder
+    }
 
     /// Sets the `User-Agent` header to be used by this client.
     ///
@@ -1228,9 +1256,11 @@ impl ClientBuilder {
 
 impl From<async_impl::ClientBuilder> for ClientBuilder {
     fn from(builder: async_impl::ClientBuilder) -> Self {
+        let base_url = builder.configured_base_url();
         Self {
             inner: builder,
             timeout: Timeout::default(),
+            base_url,
         }
     }
 }
@@ -1328,7 +1358,8 @@ impl Client {
     ///
     /// This method fails whenever supplied `Url` cannot be parsed.
     pub fn request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
-        let req = url.into_url().map(move |url| Request::new(method, url));
+        let req = into_url_with_base(url, self.inner.base_url.as_ref())
+            .map(move |url| Request::new(method, url));
         RequestBuilder::new(self.clone(), req)
     }
 
@@ -1368,6 +1399,7 @@ impl fmt::Debug for ClientBuilder {
 #[derive(Clone)]
 struct ClientHandle {
     timeout: Timeout,
+    base_url: Option<Url>,
     inner: Arc<InnerClientHandle>,
 }
 
@@ -1398,6 +1430,7 @@ impl Drop for InnerClientHandle {
 impl ClientHandle {
     fn new(builder: ClientBuilder) -> crate::Result<ClientHandle> {
         let timeout = builder.timeout;
+        let base_url = builder.base_url;
         let builder = builder.inner;
         let (tx, rx) = mpsc::unbounded_channel::<(async_impl::Request, OneshotResponse)>();
         let (spawn_tx, spawn_rx) = oneshot::channel::<crate::Result<()>>();
@@ -1466,6 +1499,7 @@ impl ClientHandle {
 
         Ok(ClientHandle {
             timeout,
+            base_url,
             inner: inner_handle,
         })
     }

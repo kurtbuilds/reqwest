@@ -33,7 +33,7 @@ use crate::cookie::service::CookieService;
 use crate::dns::hickory::HickoryDnsResolver;
 use crate::dns::{gai::GaiResolver, DnsResolverWithOverrides, DynResolver, Resolve};
 use crate::error::{self, BoxError};
-use crate::into_url::try_uri;
+use crate::into_url::{into_url_with_base, try_uri};
 use crate::proxy::Matcher as ProxyMatcher;
 use crate::redirect::{self, TowerRedirectPolicy};
 #[cfg(feature = "__rustls")]
@@ -161,6 +161,7 @@ struct Config {
     // NOTE: When adding a new field, update `fmt::Debug for ClientBuilder`
     accepts: Accepts,
     headers: HeaderMap,
+    base_url: Option<Url>,
     #[cfg(feature = "__tls")]
     hostname_verification: bool,
     #[cfg(feature = "__tls")]
@@ -289,6 +290,7 @@ impl ClientBuilder {
                 error: None,
                 accepts: Accepts::default(),
                 headers,
+                base_url: None,
                 #[cfg(feature = "__tls")]
                 hostname_verification: true,
                 #[cfg(feature = "__tls")]
@@ -1092,6 +1094,7 @@ impl ClientBuilder {
                     }
                     None => None,
                 },
+                base_url: config.base_url,
                 headers: config.headers,
                 referer: config.referer,
                 read_timeout: config.read_timeout,
@@ -1107,6 +1110,41 @@ impl ClientBuilder {
     }
 
     // Higher-level options
+
+    /// Sets a base URL to use when joining relative request URLs.
+    ///
+    /// Absolute URLs override the base URL. Relative URLs are joined using
+    /// standard URL resolution rules, so a base URL with a path should usually
+    /// end with a trailing slash.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # async fn doc() -> Result<(), reqwest::Error> {
+    /// let client = reqwest::Client::builder()
+    ///     .base_url("https://api.example.com/v1/")
+    ///     .build()?;
+    ///
+    /// let res = client.get("users").send().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn base_url<U: IntoUrl>(mut self, url: U) -> ClientBuilder {
+        match url.into_url() {
+            Ok(url) => {
+                self.config.base_url = Some(url);
+            }
+            Err(err) => {
+                self.config.error = Some(err);
+            }
+        }
+        self
+    }
+
+    #[cfg(feature = "blocking")]
+    pub(crate) fn configured_base_url(&self) -> Option<Url> {
+        self.config.base_url.clone()
+    }
 
     /// Sets the `User-Agent` header to be used by this client.
     ///
@@ -2609,7 +2647,8 @@ impl Client {
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
     pub fn request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
-        let req = url.into_url().map(move |url| Request::new(method, url));
+        let req = into_url_with_base(url, self.inner.base_url.as_ref())
+            .map(move |url| Request::new(method, url));
         RequestBuilder::new(self.clone(), req)
     }
 
@@ -2814,6 +2853,10 @@ impl Config {
 
         f.field("accepts", &self.accepts);
 
+        if let Some(ref url) = self.base_url {
+            f.field("base_url", url);
+        }
+
         if !self.proxies.is_empty() {
             f.field("proxies", &self.proxies);
         }
@@ -2981,6 +3024,7 @@ struct ClientRef {
     hyper: LayeredService<HyperService>,
     #[cfg(feature = "http3")]
     h3_client: Option<LayeredService<H3Client>>,
+    base_url: Option<Url>,
     referer: bool,
     total_timeout: RequestConfig<TotalTimeout>,
     read_timeout: Option<Duration>,
@@ -3004,6 +3048,10 @@ impl ClientRef {
         }
 
         f.field("accepts", &self.accepts);
+
+        if let Some(ref url) = self.base_url {
+            f.field("base_url", url);
+        }
 
         if !self.proxies.is_empty() {
             f.field("proxies", &self.proxies);
@@ -3175,6 +3223,30 @@ impl fmt::Debug for Pending {
 #[cfg(test)]
 mod tests {
     #![cfg(not(feature = "rustls-no-provider"))]
+
+    #[test]
+    fn request_joins_base_url() {
+        let client = super::Client::builder()
+            .base_url("https://api.example.com/v1/")
+            .build()
+            .unwrap();
+
+        let req = client.get("users").build().unwrap();
+
+        assert_eq!(req.url().as_str(), "https://api.example.com/v1/users");
+    }
+
+    #[test]
+    fn request_absolute_url_overrides_base_url() {
+        let client = super::Client::builder()
+            .base_url("https://api.example.com/v1/")
+            .build()
+            .unwrap();
+
+        let req = client.get("https://other.example/users").build().unwrap();
+
+        assert_eq!(req.url().as_str(), "https://other.example/users");
+    }
 
     #[tokio::test]
     async fn execute_request_rejects_invalid_urls() {
