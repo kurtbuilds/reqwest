@@ -147,6 +147,10 @@ impl ClientBuilder {
 
     /// Sets the `User-Agent` header to be used by this client.
     ///
+    /// By default, clients send a `User-Agent` of `reqwest/<version>`. Calling
+    /// this method overrides that default. To suppress the header entirely,
+    /// use [`ClientBuilder::no_user_agent`].
+    ///
     /// # Example
     ///
     /// ```rust
@@ -171,6 +175,15 @@ impl ClientBuilder {
         V::Error: Into<http::Error>,
     {
         self.with_inner(move |inner| inner.user_agent(value))
+    }
+
+    /// Remove the default `User-Agent` header so no `User-Agent` is sent.
+    ///
+    /// This clears any value previously set via [`ClientBuilder::user_agent`]
+    /// or [`ClientBuilder::default_headers`] and prevents the built-in default
+    /// (`reqwest/<version>`) from being sent.
+    pub fn no_user_agent(self) -> ClientBuilder {
+        self.with_inner(|inner| inner.no_user_agent())
     }
 
     /// Sets the default headers for every request.

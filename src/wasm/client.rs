@@ -327,6 +327,10 @@ impl ClientBuilder {
     }
 
     /// Sets the `User-Agent` header to be used by this client.
+    ///
+    /// By default, clients send a `User-Agent` of `reqwest/<version>`. Calling
+    /// this method overrides that default. To suppress the header entirely,
+    /// use [`ClientBuilder::no_user_agent`].
     pub fn user_agent<V>(mut self, value: V) -> ClientBuilder
     where
         V: TryInto<HeaderValue>,
@@ -340,6 +344,12 @@ impl ClientBuilder {
                 self.config.error = Some(crate::error::builder(e.into()));
             }
         }
+        self
+    }
+
+    /// Remove the default `User-Agent` header so no `User-Agent` is sent.
+    pub fn no_user_agent(mut self) -> ClientBuilder {
+        self.config.headers.remove(USER_AGENT);
         self
     }
 
@@ -367,8 +377,17 @@ struct Config {
 
 impl Default for Config {
     fn default() -> Config {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(concat!(
+                env!("CARGO_PKG_NAME"),
+                "/",
+                env!("CARGO_PKG_VERSION")
+            )),
+        );
         Config {
-            headers: HeaderMap::new(),
+            headers,
             base_url: None,
             error: None,
         }
