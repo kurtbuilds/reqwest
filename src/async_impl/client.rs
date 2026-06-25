@@ -323,7 +323,7 @@ impl ClientBuilder {
                 request_logger: None,
                 referer: true,
                 read_timeout: None,
-                timeout: None,
+                timeout: Some(Duration::from_secs(60)),
                 #[cfg(feature = "__tls")]
                 root_certs: Vec::new(),
                 #[cfg(feature = "__tls")]
@@ -1528,7 +1528,7 @@ impl ClientBuilder {
     /// The timeout is applied from when the request starts connecting until the
     /// response body has finished. Also considered a total deadline.
     ///
-    /// Default is no timeout.
+    /// Default is 60 seconds.
     pub fn timeout(mut self, timeout: Duration) -> ClientBuilder {
         self.config.timeout = Some(timeout);
         self
