@@ -161,7 +161,7 @@ struct Config {
     // NOTE: When adding a new field, update `fmt::Debug for ClientBuilder`
     accepts: Accepts,
     headers: HeaderMap,
-    base_url: Option<Url>,
+    base_url: Option<String>,
     #[cfg(feature = "__tls")]
     hostname_verification: bool,
     #[cfg(feature = "__tls")]
@@ -1137,19 +1137,16 @@ impl ClientBuilder {
     /// # }
     /// ```
     pub fn base_url<U: IntoUrl>(mut self, url: U) -> ClientBuilder {
-        match url.into_url() {
-            Ok(url) => {
-                self.config.base_url = Some(url);
-            }
-            Err(err) => {
-                self.config.error = Some(err);
-            }
+        let base = url.as_str().to_owned();
+        if let Err(err) = url.into_url() {
+            self.config.error = Some(err);
         }
+        self.config.base_url = Some(base);
         self
     }
 
     #[cfg(feature = "blocking")]
-    pub(crate) fn configured_base_url(&self) -> Option<Url> {
+    pub(crate) fn configured_base_url(&self) -> Option<String> {
         self.config.base_url.clone()
     }
 
@@ -2669,7 +2666,7 @@ impl Client {
     ///
     /// This method fails whenever the supplied `Url` cannot be parsed.
     pub fn request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
-        let req = into_url_with_base(url, self.inner.base_url.as_ref())
+        let req = into_url_with_base(url, self.inner.base_url.as_deref())
             .map(move |url| Request::new(method, url));
         RequestBuilder::new(self.clone(), req)
     }
@@ -3048,7 +3045,7 @@ struct ClientRef {
     hyper: LayeredService<HyperService>,
     #[cfg(feature = "http3")]
     h3_client: Option<LayeredService<H3Client>>,
-    base_url: Option<Url>,
+    base_url: Option<String>,
     referer: bool,
     total_timeout: RequestConfig<TotalTimeout>,
     read_timeout: Option<Duration>,
@@ -3247,6 +3244,35 @@ impl fmt::Debug for Pending {
 #[cfg(test)]
 mod tests {
     #![cfg(not(feature = "rustls-no-provider"))]
+
+    #[test]
+    fn build_rejects_unparseable_base_url() {
+        let err = super::Client::builder()
+            .base_url("not a url")
+            .build()
+            .unwrap_err();
+
+        assert!(err.is_builder());
+        assert_eq!(
+            std::error::Error::source(&err).unwrap().to_string(),
+            "relative URL without a base"
+        );
+    }
+
+    #[test]
+    fn build_rejects_base_url_with_bad_scheme() {
+        // Parses fine as a `Url`, but is not usable for a request.
+        let err = super::Client::builder()
+            .base_url("file:///etc/hosts")
+            .build()
+            .unwrap_err();
+
+        assert!(err.is_builder());
+        assert_eq!(
+            std::error::Error::source(&err).unwrap().to_string(),
+            "URL scheme is not allowed"
+        );
+    }
 
     #[test]
     fn request_joins_base_url() {

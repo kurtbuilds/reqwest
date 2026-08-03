@@ -123,7 +123,7 @@ impl Client {
     ///
     /// This method fails whenever supplied `Url` cannot be parsed.
     pub fn request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
-        let req = into_url_with_base(url, self.config.base_url.as_ref())
+        let req = into_url_with_base(url, self.config.base_url.as_deref())
             .map(move |url| Request::new(method, url));
         RequestBuilder::new(self.clone(), req)
     }
@@ -315,14 +315,11 @@ impl ClientBuilder {
     /// Absolute URLs override the base URL. Relative URLs are appended directly
     /// to the base URL.
     pub fn base_url<U: IntoUrl>(mut self, url: U) -> ClientBuilder {
-        match url.into_url() {
-            Ok(url) => {
-                self.config.base_url = Some(url);
-            }
-            Err(err) => {
-                self.config.error = Some(err);
-            }
+        let base = url.as_str().to_owned();
+        if let Err(err) = url.into_url() {
+            self.config.error = Some(err);
         }
+        self.config.base_url = Some(base);
         self
     }
 
@@ -371,7 +368,7 @@ impl Default for ClientBuilder {
 #[derive(Debug)]
 struct Config {
     headers: HeaderMap,
-    base_url: Option<Url>,
+    base_url: Option<String>,
     error: Option<crate::Error>,
 }
 

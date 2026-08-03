@@ -34,7 +34,7 @@ use crate::tls::CertificateRevocationList;
 use crate::Certificate;
 #[cfg(any(feature = "__native-tls", feature = "__rustls"))]
 use crate::Identity;
-use crate::{async_impl, header, redirect, IntoUrl, Method, Proxy, Url};
+use crate::{async_impl, header, redirect, IntoUrl, Method, Proxy};
 
 /// A `Client` to make Requests with.
 ///
@@ -81,7 +81,7 @@ pub struct Client {
 pub struct ClientBuilder {
     inner: async_impl::ClientBuilder,
     timeout: Timeout,
-    base_url: Option<Url>,
+    base_url: Option<String>,
 }
 
 impl Default for ClientBuilder {
@@ -141,7 +141,7 @@ impl ClientBuilder {
     pub fn base_url<U: IntoUrl>(self, url: U) -> ClientBuilder {
         let base_url = url.as_str().to_owned();
         let mut builder = self.with_inner(move |inner| inner.base_url(url));
-        builder.base_url = into_url_with_base(base_url.as_str(), None).ok();
+        builder.base_url = Some(base_url);
         builder
     }
 
@@ -1370,7 +1370,7 @@ impl Client {
     ///
     /// This method fails whenever supplied `Url` cannot be parsed.
     pub fn request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
-        let req = into_url_with_base(url, self.inner.base_url.as_ref())
+        let req = into_url_with_base(url, self.inner.base_url.as_deref())
             .map(move |url| Request::new(method, url));
         RequestBuilder::new(self.clone(), req)
     }
@@ -1411,7 +1411,7 @@ impl fmt::Debug for ClientBuilder {
 #[derive(Clone)]
 struct ClientHandle {
     timeout: Timeout,
-    base_url: Option<Url>,
+    base_url: Option<String>,
     inner: Arc<InnerClientHandle>,
 }
 

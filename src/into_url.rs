@@ -73,15 +73,11 @@ impl IntoUrlSealed for String {
     }
 }
 
-pub(crate) fn into_url_with_base<U: IntoUrl>(url: U, base_url: Option<&Url>) -> crate::Result<Url> {
+pub(crate) fn into_url_with_base<U: IntoUrl>(url: U, base_url: Option<&str>) -> crate::Result<Url> {
     match base_url {
-        Some(base_url) => {
-            let path = url.as_str();
-            let mut url = base_url.clone();
-            let path = format!("{}{}", base_url.path(), path);
-            url.set_path(&path);
-            Ok(url)
-        }
+        // Skipped when there is no base so that an already-parsed `Url` does
+        // not get formatted and reparsed.
+        Some(base_url) => format!("{}{}", base_url, url.as_str()).into_url(),
         None => url.into_url(),
     }
 }
@@ -119,26 +115,33 @@ mod tests {
 
     #[test]
     fn into_url_with_base_joins_relative_url() {
-        let base_url = Url::parse("https://example.com/api/").unwrap();
-        let url = into_url_with_base("users", Some(&base_url)).unwrap();
+        let url = into_url_with_base("users", Some("https://example.com/api/")).unwrap();
 
         assert_eq!(url.as_str(), "https://example.com/api/users");
     }
 
     #[test]
     fn into_url_with_base_appends_leading_slash_path() {
-        let base_url = Url::parse("https://localhost:5000/api/v1").unwrap();
-        let url = into_url_with_base("/foo/bar", Some(&base_url)).unwrap();
+        let url = into_url_with_base("/foo/bar", Some("https://localhost:5000/api/v1")).unwrap();
 
         assert_eq!(url.as_str(), "https://localhost:5000/api/v1/foo/bar");
     }
 
     #[test]
     fn into_url_with_base_appends_without_normalizing_slashes() {
-        let base_url = Url::parse("https://example.com/api/").unwrap();
-        let url = into_url_with_base("/users", Some(&base_url)).unwrap();
+        let url = into_url_with_base("/users", Some("https://example.com/api/")).unwrap();
 
         assert_eq!(url.as_str(), "https://example.com/api//users");
+    }
+
+    #[test]
+    fn into_url_with_base_keeps_query_a_query() {
+        let url =
+            into_url_with_base("users?source=feed_all_articles", Some("https://example.com/api/"))
+                .unwrap();
+
+        assert_eq!(url.path(), "/api/users");
+        assert_eq!(url.query(), Some("source=feed_all_articles"));
     }
 
     #[test]
