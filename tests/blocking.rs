@@ -412,3 +412,49 @@ fn test_response_no_tls_info_for_http() {
     let body = res.text().unwrap();
     assert_eq!(b"Hello", body.as_bytes());
 }
+
+#[test]
+fn test_retry_backoff() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let cnt = Arc::new(AtomicUsize::new(0));
+    let seen = cnt.clone();
+    let server = server::http(move |_req| {
+        let cnt = cnt.clone();
+        async move {
+            if cnt.fetch_add(1, Ordering::Relaxed) == 0 {
+                http::Response::builder()
+                    .status(http::StatusCode::TOO_MANY_REQUESTS)
+                    .header("retry-after", "1")
+                    .body(Default::default())
+                    .unwrap()
+            } else {
+                http::Response::default()
+            }
+        }
+    });
+
+    let retries = reqwest::retry::any_host()
+        .retry_on_status(http::StatusCode::TOO_MANY_REQUESTS)
+        .backoff(Duration::ZERO);
+
+    let url = format!("http://{}/retry", server.addr());
+    let start = Instant::now();
+    let res = reqwest::blocking::Client::builder()
+        .retry(retries)
+        .build()
+        .expect("client builder")
+        .get(&url)
+        .send()
+        .expect("request");
+    let elapsed = start.elapsed();
+
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    assert_eq!(seen.load(Ordering::Relaxed), 2);
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "should have honored Retry-After, took {elapsed:?}"
+    );
+}

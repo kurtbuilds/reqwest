@@ -384,7 +384,10 @@ impl ClientBuilder {
 
     /// Set a request retry policy.
     ///
-    /// Default behavior is to retry protocol NACKs.
+    /// The default [`standard`][crate::retry::standard()] policy retries
+    /// `429 Too Many Requests`, `503 Service Unavailable`, and safe transient
+    /// transport failures. It makes at most three total attempts. Setting a
+    /// policy here replaces the entire default policy.
     pub fn retry(self, policy: crate::retry::Builder) -> ClientBuilder {
         self.with_inner(move |inner| inner.retry(policy))
     }

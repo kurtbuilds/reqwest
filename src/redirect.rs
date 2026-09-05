@@ -268,6 +268,7 @@ pub(crate) struct TowerRedirectPolicy {
     referer: bool,
     urls: Vec<Url>,
     https_only: bool,
+    deadline: Option<crate::retry::Deadline>,
 }
 
 impl TowerRedirectPolicy {
@@ -277,6 +278,7 @@ impl TowerRedirectPolicy {
             referer: false,
             urls: Vec::new(),
             https_only: false,
+            deadline: None,
         }
     }
 
@@ -335,6 +337,18 @@ impl TowerPolicy<async_impl::body::Body, crate::Error> for TowerRedirectPolicy {
     }
 
     fn on_request(&mut self, req: &mut http::Request<async_impl::body::Body>) {
+        // Following a redirect builds a fresh request, dropping the
+        // extensions set for the original. Carry the deadline over, so that
+        // retries after a redirect still know when to give up.
+        match req.extensions().get::<crate::retry::Deadline>() {
+            Some(deadline) => self.deadline = Some(*deadline),
+            None => {
+                if let Some(deadline) = self.deadline {
+                    req.extensions_mut().insert(deadline);
+                }
+            }
+        }
+
         if let Ok(next_url) = Url::parse(&req.uri().to_string()) {
             remove_sensitive_headers(req.headers_mut(), &next_url, &self.urls);
             if self.referer {

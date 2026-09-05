@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, convert::TryInto, net::SocketAddr};
 use std::{fmt, str};
 
@@ -1460,7 +1460,25 @@ impl ClientBuilder {
 
     /// Set a request retry policy.
     ///
-    /// Default behavior is to retry protocol NACKs.
+    /// The default [`standard`][crate::retry::standard()] policy retries
+    /// `429 Too Many Requests`, `503 Service Unavailable`, and safe transient
+    /// transport failures. It makes at most three total attempts. Setting a
+    /// policy here replaces the entire default policy.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # fn run() -> Result<(), reqwest::Error> {
+    /// let client = reqwest::Client::builder()
+    ///     .retry(
+    ///         reqwest::retry::standard()
+    ///             .retry_on_status(http::StatusCode::GATEWAY_TIMEOUT)
+    ///             .max_attempts(5),
+    ///     )
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
     // XXX: accept an `impl retry::IntoPolicy` instead?
     pub fn retry(mut self, policy: crate::retry::Builder) -> ClientBuilder {
         self.config.retry_policy = policy;
@@ -2724,29 +2742,36 @@ impl Client {
             .uri(uri)
             .version(version);
 
+        let total_timeout = self.inner.total_timeout.fetch(&extensions).copied();
+        // Let the retry policy know how long the request has left, so it
+        // doesn't sleep past the deadline just to be cancelled.
+        let deadline = total_timeout
+            .and_then(|timeout| Instant::now().checked_add(timeout))
+            .map(crate::retry::Deadline);
+
         let in_flight = match version {
             #[cfg(feature = "http3")]
             http::Version::HTTP_3 if self.inner.h3_client.is_some() => {
                 let mut req = builder.body(body).expect("valid request parts");
                 *req.headers_mut() = headers.clone();
+                if let Some(deadline) = deadline {
+                    req.extensions_mut().insert(deadline);
+                }
                 let mut h3 = self.inner.h3_client.as_ref().unwrap().clone();
                 ResponseFuture::H3(h3.call(req))
             }
             _ => {
                 let mut req = builder.body(body).expect("valid request parts");
                 *req.headers_mut() = headers.clone();
+                if let Some(deadline) = deadline {
+                    req.extensions_mut().insert(deadline);
+                }
                 let mut hyper = self.inner.hyper.clone();
                 ResponseFuture::Default(hyper.call(req))
             }
         };
 
-        let total_timeout = self
-            .inner
-            .total_timeout
-            .fetch(&extensions)
-            .copied()
-            .map(tokio::time::sleep)
-            .map(Box::pin);
+        let total_timeout = total_timeout.map(tokio::time::sleep).map(Box::pin);
 
         let read_timeout_fut = self
             .inner
