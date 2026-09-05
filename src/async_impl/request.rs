@@ -6,8 +6,6 @@ use std::time::Duration;
 
 #[cfg(any(feature = "query", feature = "form", feature = "json"))]
 use serde::Serialize;
-#[cfg(feature = "json")]
-use serde_json;
 
 use super::body::Body;
 use super::client::{Client, Pending};
@@ -670,10 +668,8 @@ impl TryFrom<Request> for HttpRequest<Body> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "rustls-no-provider")))]
 mod tests {
-    #![cfg(not(feature = "rustls-no-provider"))]
-
     use super::*;
     #[cfg(feature = "query")]
     use std::collections::BTreeMap;

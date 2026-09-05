@@ -135,13 +135,15 @@ where
 }
 
 fn random_tmp_path() -> std::path::PathBuf {
-    use std::hash::BuildHasher;
+    use std::hash::{BuildHasher, Hash, Hasher};
 
     let mut buf = std::env::temp_dir();
 
     // libstd uses system random to create each one
     let rng = std::collections::hash_map::RandomState::new();
-    let n = rng.hash_one("reqwest-uds-sock");
+    let mut hasher = rng.build_hasher();
+    "reqwest-uds-sock".hash(&mut hasher);
+    let n = hasher.finish();
 
     buf.push(format!("reqwest-test-uds-sock-{}", n));
 

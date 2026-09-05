@@ -54,7 +54,7 @@ mod background_threadpool {
     use std::{
         future::Future,
         pin::Pin,
-        sync::OnceLock,
+        sync::Mutex,
         task::{Context, Poll},
     };
 
@@ -63,9 +63,10 @@ mod background_threadpool {
     use tokio::{runtime::Handle, select, sync::mpsc::error::TrySendError};
     use tower::{BoxError, Layer, Service};
 
-    static CPU_HEAVY_THREAD_POOL: OnceLock<
-        tokio::sync::mpsc::Sender<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
-    > = OnceLock::new();
+    type BackgroundTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+    type BackgroundSender = tokio::sync::mpsc::Sender<BackgroundTask>;
+
+    static CPU_HEAVY_THREAD_POOL: Mutex<Option<BackgroundSender>> = Mutex::new(None);
 
     pub(crate) fn init_background_runtime() {
         std::thread::Builder::new()
@@ -107,7 +108,11 @@ mod background_threadpool {
         // we only use this channel for routing work, it should move pretty quick, it can be small
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         // share the handle to the background channel globally
-        CPU_HEAVY_THREAD_POOL.set(tx).unwrap();
+        let previous = CPU_HEAVY_THREAD_POOL
+            .lock()
+            .expect("background thread pool mutex poisoned")
+            .replace(tx);
+        assert!(previous.is_none(), "background thread pool already started");
 
         while let Some(work) = rx.recv().await {
             tokio::task::spawn(work);
@@ -116,9 +121,14 @@ mod background_threadpool {
 
     // retrieve the sender to the background channel, and send the future over to it for execution
     fn send_to_background_runtime(future: impl Future<Output = ()> + Send + 'static) {
-        let tx = CPU_HEAVY_THREAD_POOL.get().expect(
-            "start up the secondary tokio runtime before sending to `CPU_HEAVY_THREAD_POOL`",
-        );
+        let tx = CPU_HEAVY_THREAD_POOL
+            .lock()
+            .expect("background thread pool mutex poisoned")
+            .as_ref()
+            .expect(
+                "start up the secondary tokio runtime before sending to `CPU_HEAVY_THREAD_POOL`",
+            )
+            .clone();
 
         match tx.try_send(Box::pin(future)) {
             Ok(_) => (),
@@ -129,7 +139,6 @@ mod background_threadpool {
                 log::warn!(
                     "background cpu heavy runtime channel is full, task spawning loop delayed"
                 );
-                let tx = tx.clone();
                 Handle::current().spawn(async move {
                     tx.send(msg)
                         .await
@@ -207,7 +216,7 @@ mod background_threadpool {
                     _ = tx.closed() => {
                         // receiver already dropped, don't need to do anything
                     }
-                    result = response.map_err(|err| Into::<BoxError>::into(err)) => {
+                    result = response.map_err(Into::<BoxError>::into) => {
                         // if this fails, the receiver already dropped, so we don't need to do anything
                         let _ = tx.send(result);
                     }
@@ -247,7 +256,7 @@ mod background_threadpool {
             // now poll on the receiver end of the oneshot to get the result
             match this.rx.poll(cx) {
                 Poll::Ready(v) => match v {
-                    Ok(v) => Poll::Ready(v.map_err(Into::into)),
+                    Ok(v) => Poll::Ready(v),
                     Err(err) => Poll::Ready(Err(Box::new(err) as BoxError)),
                 },
                 Poll::Pending => Poll::Pending,
@@ -260,5 +269,5 @@ mod background_threadpool {
 // for wasm32 target, because tokio isn't compatible with wasm32.
 // If you aren't building for wasm32, you don't need that line.
 // The two lines below avoid the "'main' function not found" error when building for wasm32 target.
-#[cfg(any(target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 fn main() {}

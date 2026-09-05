@@ -6,11 +6,10 @@ use support::server;
 use std::env;
 use std::ffi::OsString;
 
-use std::sync::LazyLock;
 use tokio::sync::Mutex;
 
 // serialize tests that read from / write to environment variables
-static HTTP_PROXY_ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static HTTP_PROXY_ENV_MUTEX: Mutex<()> = Mutex::const_new(());
 
 struct EnvVarGuard {
     previous: Vec<(&'static str, Option<OsString>)>,

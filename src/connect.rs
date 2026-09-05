@@ -336,6 +336,7 @@ where {
     }
 
     #[cfg(feature = "__rustls")]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_rustls_tls<T>(
         mut http: HttpConnector,
         tls: rustls::ClientConfig,
@@ -511,7 +512,7 @@ enum Inner {
     Http(HttpConnector),
     #[cfg(feature = "__native-tls")]
     NativeTls(HttpConnector, TlsConnector),
-    #[cfg(any(feature = "__rustls"))]
+    #[cfg(feature = "__rustls")]
     RustlsTls {
         http: HttpConnector,
         tls: Arc<rustls::ClientConfig>,
@@ -796,7 +797,7 @@ impl ConnectorService {
         let auth = proxy.basic_auth().cloned();
 
         #[cfg(feature = "__tls")]
-        let misc = proxy.custom_headers().clone();
+        let misc = proxy.custom_headers();
 
         match &self.inner {
             #[cfg(feature = "__native-tls")]

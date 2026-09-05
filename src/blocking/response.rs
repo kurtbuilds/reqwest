@@ -354,9 +354,9 @@ impl Response {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn copy_to<W: ?Sized>(&mut self, w: &mut W) -> crate::Result<u64>
+    pub fn copy_to<W>(&mut self, w: &mut W) -> crate::Result<u64>
     where
-        W: io::Write,
+        W: io::Write + ?Sized,
     {
         io::copy(self, w).map_err(crate::error::decode_io)
     }

@@ -595,7 +595,7 @@ pub(crate) enum TlsBackend {
     #[cfg(feature = "__rustls")]
     Rustls,
     #[cfg(feature = "__rustls")]
-    BuiltRustls(rustls::ClientConfig),
+    BuiltRustls(Box<rustls::ClientConfig>),
     #[cfg(any(feature = "__native-tls", feature = "__rustls",))]
     UnknownPreconfigured,
 }

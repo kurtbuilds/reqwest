@@ -121,6 +121,9 @@ struct Accepts {
     deflate: bool,
 }
 
+// When no compression feature is enabled this is an empty struct, but with a
+// compression feature its fields intentionally default to `true`.
+#[allow(clippy::derivable_impls)]
 impl Default for Accepts {
     fn default() -> Accepts {
         Accepts {
@@ -653,7 +656,7 @@ impl ClientBuilder {
                 TlsBackend::BuiltRustls(conn) => {
                     #[cfg(feature = "http3")]
                     {
-                        let mut h3_tls = conn.clone();
+                        let mut h3_tls = (*conn).clone();
                         h3_tls.alpn_protocols = vec!["h3".into()];
 
                         h3_connector = build_h3_connector(
@@ -673,7 +676,7 @@ impl ClientBuilder {
 
                     ConnectorBuilder::new_rustls_tls(
                         http,
-                        conn,
+                        *conn,
                         proxies.clone(),
                         user_agent(&config.headers),
                         config.local_address,
@@ -728,7 +731,7 @@ impl ClientBuilder {
                     // Allow user to have installed a runtime default.
                     // If not, we ship with _our_ recommended default.
                     let provider = rustls::crypto::CryptoProvider::get_default()
-                        .map(|arc| arc.clone())
+                        .cloned()
                         .unwrap_or_else(default_rustls_crypto_provider);
 
                     // Build TLS config
@@ -2313,7 +2316,7 @@ impl ClientBuilder {
                 (&mut tls as &mut dyn Any).downcast_mut::<Option<rustls::ClientConfig>>()
             {
                 let tls = conn.take().expect("is definitely Some");
-                let tls = crate::tls::TlsBackend::BuiltRustls(tls);
+                let tls = crate::tls::TlsBackend::BuiltRustls(Box::new(tls));
                 self.config.tls = tls;
                 return self;
             }
@@ -3266,10 +3269,8 @@ impl fmt::Debug for Pending {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "rustls-no-provider")))]
 mod tests {
-    #![cfg(not(feature = "rustls-no-provider"))]
-
     #[test]
     fn build_rejects_unparseable_base_url() {
         let err = super::Client::builder()

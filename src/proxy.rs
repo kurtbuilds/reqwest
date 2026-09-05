@@ -81,7 +81,7 @@ pub(crate) struct Matcher {
 }
 
 enum Matcher_ {
-    Util(matcher::Matcher),
+    Util(Box<matcher::Matcher>),
     Custom(Custom),
 }
 
@@ -378,34 +378,34 @@ impl Proxy {
                 maybe_has_http_auth = cache_maybe_has_http_auth(&url, &extra.auth);
                 maybe_has_http_custom_headers =
                     cache_maybe_has_http_custom_headers(&url, &extra.misc);
-                Matcher_::Util(
+                Matcher_::Util(Box::new(
                     matcher::Matcher::builder()
                         .all(String::from(url))
                         .no(no_proxy.as_ref().map(|n| n.inner.as_ref()).unwrap_or(""))
                         .build(),
-                )
+                ))
             }
             Intercept::Http(url) => {
                 maybe_has_http_auth = cache_maybe_has_http_auth(&url, &extra.auth);
                 maybe_has_http_custom_headers =
                     cache_maybe_has_http_custom_headers(&url, &extra.misc);
-                Matcher_::Util(
+                Matcher_::Util(Box::new(
                     matcher::Matcher::builder()
                         .http(String::from(url))
                         .no(no_proxy.as_ref().map(|n| n.inner.as_ref()).unwrap_or(""))
                         .build(),
-                )
+                ))
             }
             Intercept::Https(url) => {
                 maybe_has_http_auth = cache_maybe_has_http_auth(&url, &extra.auth);
                 maybe_has_http_custom_headers =
                     cache_maybe_has_http_custom_headers(&url, &extra.misc);
-                Matcher_::Util(
+                Matcher_::Util(Box::new(
                     matcher::Matcher::builder()
                         .https(String::from(url))
                         .no(no_proxy.as_ref().map(|n| n.inner.as_ref()).unwrap_or(""))
                         .build(),
-                )
+                ))
             }
             Intercept::Custom(mut custom) => {
                 maybe_has_http_auth = true; // never know
@@ -454,7 +454,7 @@ impl Proxy {
 
 fn cache_maybe_has_http_auth(url: &Url, extra: &Option<HeaderValue>) -> bool {
     (url.scheme() == "http" || url.scheme() == "https")
-        && (url.username().len() > 0 || url.password().is_some() || extra.is_some())
+        && (!url.username().is_empty() || url.password().is_some() || extra.is_some())
 }
 
 fn cache_maybe_has_http_custom_headers(url: &Url, extra: &Option<HeaderMap>) -> bool {
@@ -514,7 +514,7 @@ impl NoProxy {
 impl Matcher {
     pub(crate) fn system() -> Self {
         Self {
-            inner: Matcher_::Util(matcher::Matcher::from_system()),
+            inner: Matcher_::Util(Box::new(matcher::Matcher::from_system())),
             extra: Extra {
                 auth: None,
                 misc: None,
@@ -771,9 +771,11 @@ fn url_auth(url: &mut Url, username: &str, password: &str) {
 
 #[derive(Clone)]
 struct Custom {
-    func: Arc<dyn Fn(&Url) -> Option<crate::Result<Url>> + Send + Sync + 'static>,
+    func: Arc<CustomFn>,
     no_proxy: Option<NoProxy>,
 }
+
+type CustomFn = dyn Fn(&Url) -> Option<crate::Result<Url>> + Send + Sync + 'static;
 
 impl Custom {
     fn call(&self, uri: &http::Uri) -> Option<matcher::Intercept> {
