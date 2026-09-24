@@ -366,8 +366,9 @@ if_hyper! {
     doctest!("../README.md");
 
     pub use self::async_impl::{
-        Body, Client, ClientBuilder, Request, RequestBuilder, Response, Upgraded,
+        Body, Client, ClientBuilder, Middleware, Next, Request, RequestBuilder, Response, Upgraded,
     };
+    pub use self::async_impl::middleware;
     pub use self::proxy::{Proxy,NoProxy};
     #[cfg(feature = "__tls")]
     // Re-exports, to be removed in a future release

@@ -195,6 +195,16 @@ impl Error {
         matches!(self.inner.kind, Kind::Upgrade)
     }
 
+    /// Create an error from a request middleware.
+    pub fn middleware<E: Into<Box<dyn StdError + Send + Sync>>>(source: E) -> Error {
+        Error::new(Kind::Middleware, Some(source))
+    }
+
+    /// Returns true if the error came from a request middleware
+    pub fn is_middleware(&self) -> bool {
+        matches!(self.inner.kind, Kind::Middleware)
+    }
+
     // private
 
     #[allow(unused)]
@@ -242,6 +252,7 @@ impl fmt::Display for Error {
             Kind::Decode => f.write_str("error decoding response body")?,
             Kind::Redirect => f.write_str("error following redirect")?,
             Kind::Upgrade => f.write_str("error upgrading connection")?,
+            Kind::Middleware => f.write_str("middleware error")?,
             #[cfg(all(target_arch = "wasm32", any(target_os = "unknown", target_os = "none")))]
             Kind::Status(ref code) => {
                 let prefix = if code.is_client_error() {
@@ -316,6 +327,7 @@ pub(crate) enum Kind {
     Body,
     Decode,
     Upgrade,
+    Middleware,
 }
 
 // constructors

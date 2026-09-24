@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use std::{collections::HashMap, convert::TryInto, net::SocketAddr};
 use std::{fmt, str};
 
+use super::middleware::{BoxFuture, Middleware, Next};
 use super::request::{Request, RequestBuilder};
 use super::response::Response;
 use super::Body;
@@ -188,6 +189,7 @@ struct Config {
     auto_env_proxy: bool,
     redirect_policy: redirect::Policy,
     retry_policy: crate::retry::Builder,
+    middleware: Vec<Arc<dyn Middleware>>,
     request_logger: Option<crate::logging::Logger>,
     referer: bool,
     read_timeout: Option<Duration>,
@@ -323,6 +325,7 @@ impl ClientBuilder {
                 auto_env_proxy: false,
                 redirect_policy: redirect::Policy::default(),
                 retry_policy: crate::retry::Builder::default(),
+                middleware: Vec::new(),
                 request_logger: None,
                 referer: true,
                 read_timeout: None,
@@ -1116,6 +1119,7 @@ impl ClientBuilder {
                 proxies_maybe_http_custom_headers,
                 https_only: config.https_only,
                 redirect_policy_desc,
+                middleware: config.middleware,
             }),
         })
     }
@@ -1485,6 +1489,15 @@ impl ClientBuilder {
     // XXX: accept an `impl retry::IntoPolicy` instead?
     pub fn retry(mut self, policy: crate::retry::Builder) -> ClientBuilder {
         self.config.retry_policy = policy;
+        self
+    }
+
+    /// Add a middleware that runs around every request.
+    ///
+    /// Middleware runs in the order it was added. The first one added sees
+    /// the request first and the response last. See [`Middleware`].
+    pub fn middleware<M: Middleware>(mut self, middleware: M) -> ClientBuilder {
+        self.config.middleware.push(Arc::new(middleware));
         self
     }
 
@@ -2712,6 +2725,19 @@ impl Client {
     }
 
     pub(super) fn execute_request(&self, req: Request) -> Pending {
+        if self.inner.middleware.is_empty() {
+            return self.execute_without_middleware(req);
+        }
+        Pending {
+            inner: PendingInner::Middleware(Next::new(self.clone()).run(req)),
+        }
+    }
+
+    pub(super) fn middleware(&self, index: usize) -> Option<Arc<dyn Middleware>> {
+        self.inner.middleware.get(index).cloned()
+    }
+
+    pub(super) fn execute_without_middleware(&self, req: Request) -> Pending {
         let (method, url, mut headers, body, version, extensions) = req.pieces();
         if url.scheme() != "http" && url.scheme() != "https" {
             return Pending::new_err(error::url_bad_scheme(url));
@@ -3082,6 +3108,7 @@ struct ClientRef {
     proxies_maybe_http_custom_headers: bool,
     https_only: bool,
     redirect_policy_desc: Option<String>,
+    middleware: Vec<Arc<dyn Middleware>>,
 }
 
 impl ClientRef {
@@ -3133,6 +3160,7 @@ pin_project! {
 
 enum PendingInner {
     Request(Pin<Box<PendingRequest>>),
+    Middleware(BoxFuture<'static, Result<Response, crate::Error>>),
     Error(Option<crate::Error>),
 }
 
@@ -3193,6 +3221,7 @@ impl Future for Pending {
         let inner = self.inner();
         match inner.get_mut() {
             PendingInner::Request(ref mut req) => Pin::new(req).poll(cx),
+            PendingInner::Middleware(ref mut fut) => fut.as_mut().poll(cx),
             PendingInner::Error(ref mut err) => Poll::Ready(Err(err
                 .take()
                 .expect("Pending error polled more than once"))),
@@ -3264,6 +3293,7 @@ impl fmt::Debug for Pending {
                 .field("method", &req.method)
                 .field("url", &req.url)
                 .finish(),
+            PendingInner::Middleware(_) => f.debug_struct("Pending").finish_non_exhaustive(),
             PendingInner::Error(ref err) => f.debug_struct("Pending").field("error", err).finish(),
         }
     }
