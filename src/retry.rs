@@ -11,7 +11,11 @@
 //! A `Client` uses [`standard()`] retry behavior by default. It retries
 //! `429 Too Many Requests` and `503 Service Unavailable` responses for
 //! idempotent requests, or requests with an `Idempotency-Key` header. It also
-//! transparently retries failures where the server indicates that it did not
+//! retries transient GET/HEAD transport failures, such as connection resets,
+//! refused connections, premature connection closes, and timeouts. These use
+//! the same backoff, budget, and deadline as HTTP status retries. Builder,
+//! certificate validation, and other unrecognized errors are not retried.
+//! It also transparently retries failures where the server indicates that it did not
 //! process the request.
 //!
 //! The standard policy makes at most three total attempts, uses exponential
@@ -108,6 +112,8 @@ pub(crate) struct Deadline(pub(crate) Instant);
 /// This retries `429 Too Many Requests` and `503 Service Unavailable`
 /// responses for idempotent requests, or requests with an `Idempotency-Key`
 /// header. It also retries safe transient transport failures.
+/// GET/HEAD transient transport failures use backoff and the retry budget;
+/// protocol failures known not to have been processed retry immediately.
 pub fn standard() -> Builder {
     let mut builder = Builder::with_scope(scope::Scoped::Unscoped);
     builder.classifier = classify::Classifier::Standard;
@@ -590,6 +596,42 @@ impl std::fmt::Debug for Delay {
     }
 }
 
+fn is_retryable_read_error(err: &crate::Error) -> bool {
+    use std::error::Error as _;
+    use std::io::ErrorKind;
+
+    if !err.is_request() {
+        return false;
+    }
+    if err.is_timeout() {
+        return true;
+    }
+    let mut source = err.source();
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            if matches!(
+                io.kind(),
+                ErrorKind::ConnectionRefused
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::NotConnected
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::TimedOut
+                    | ErrorKind::UnexpectedEof
+            ) {
+                return true;
+            }
+        }
+        if let Some(hyper) = cause.downcast_ref::<hyper::Error>() {
+            if hyper.is_closed() || hyper.is_incomplete_message() {
+                return true;
+            }
+        }
+        source = cause.source();
+    }
+    false
+}
+
 fn is_retryable_error(err: &crate::Error) -> bool {
     use std::error::Error as _;
 
@@ -970,6 +1012,16 @@ mod classify {
         }
 
         fn is_standard_retry(&self) -> bool {
+            if matches!(*self.method(), http::Method::GET | http::Method::HEAD)
+                && self
+                    .1
+                    .as_ref()
+                    .err()
+                    .map(|err| super::is_retryable_read_error(err))
+                    .unwrap_or(false)
+            {
+                return true;
+            }
             let transient_status = matches!(
                 self.status(),
                 Some(http::StatusCode::TOO_MANY_REQUESTS | http::StatusCode::SERVICE_UNAVAILABLE)
@@ -1068,6 +1120,95 @@ mod classify {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request(method: http::Method) -> Req {
+        http::Request::builder()
+            .method(method)
+            .uri("https://example.com/")
+            .body(crate::async_impl::body::Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn standard_retries_read_transport_errors_with_backoff_and_budget() {
+        use std::io::ErrorKind;
+
+        let policy = standard().into_policy();
+        for kind in [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::NotConnected,
+            ErrorKind::BrokenPipe,
+            ErrorKind::TimedOut,
+            ErrorKind::UnexpectedEof,
+        ] {
+            // Check a nested source, as in a connector error wrapped by hyper.
+            let error = crate::error::request(crate::error::request(std::io::Error::from(kind)));
+            let result: crate::Result<http::Response<()>> = Err(error);
+            for method in [http::Method::GET, http::Method::HEAD] {
+                assert!(matches!(
+                    policy.retry_kind(&request(method), &result),
+                    Some(RetryKind::Application)
+                ));
+            }
+            for method in [http::Method::POST, http::Method::PUT, http::Method::DELETE] {
+                let mut req = request(method);
+                req.headers_mut()
+                    .insert("idempotency-key", "key".parse().unwrap());
+                assert!(policy.retry_kind(&req, &result).is_none());
+            }
+            for builder in [custom(), never()] {
+                assert!(builder
+                    .into_policy()
+                    .retry_kind(&request(http::Method::GET), &result)
+                    .is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn standard_does_not_retry_permanent_or_non_request_errors() {
+        let policy = standard().into_policy();
+        let req = request(http::Method::GET);
+        for error in [
+            crate::error::request(std::io::Error::from(std::io::ErrorKind::InvalidData)),
+            crate::error::request(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            crate::error::request("unrecognized error"),
+            crate::error::builder(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+            crate::error::body(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+            crate::error::decode(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            let result: crate::Result<http::Response<()>> = Err(error);
+            assert!(policy.retry_kind(&req, &result).is_none());
+        }
+        #[cfg(feature = "__rustls")]
+        {
+            let error = crate::error::request(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
+            ));
+            let result: crate::Result<http::Response<()>> = Err(error);
+            assert!(policy.retry_kind(&req, &result).is_none());
+        }
+    }
+
+    #[test]
+    fn read_transport_retries_respect_attempt_limit_and_deadline() {
+        use tower::retry::Policy as _;
+
+        let mut policy = standard().no_budget().backoff(Duration::ZERO).into_policy();
+        let mut req = request(http::Method::GET);
+        let mut result: crate::Result<http::Response<()>> =
+            Err(crate::error::request(crate::error::TimedOut));
+        assert!(policy.retry(&mut req, &mut result).is_some());
+        assert!(policy.retry(&mut req, &mut result).is_some());
+        assert!(policy.retry(&mut req, &mut result).is_none());
+
+        let mut policy = standard().into_policy();
+        req.extensions_mut().insert(Deadline(Instant::now()));
+        assert!(policy.retry(&mut req, &mut result).is_none());
+    }
 
     fn header(value: &str) -> http::HeaderMap {
         let mut headers = http::HeaderMap::new();
