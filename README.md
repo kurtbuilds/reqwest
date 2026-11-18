@@ -18,8 +18,9 @@ An ergonomic, batteries-included HTTP Client for Rust.
 ## Fork retry policy
 
 This fork enables the [standard retry policy](src/retry.rs) by default. It
-retries transient GET/HEAD transport failures with backoff, a per-host budget,
-and the request deadline. HTTP status and safe protocol retries remain enabled.
+separates evidence that a request was unprocessed from temporary failures of
+repeatable requests. The policy documentation defines replay safety, backoff,
+budgets, and deadlines.
 Use `reqwest::retry::never()` to disable retries or `custom()` to replace the
 standard conditions.
 

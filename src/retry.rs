@@ -8,20 +8,26 @@
 //!
 //! # Defaults
 //!
-//! A `Client` uses [`standard()`] retry behavior by default. It retries
-//! `429 Too Many Requests` and `503 Service Unavailable` responses for
-//! idempotent requests, or requests with an `Idempotency-Key` header. It also
-//! retries transient GET/HEAD transport failures, such as connection resets,
-//! refused connections, premature connection closes, and timeouts. These use
-//! the same backoff, budget, and deadline as HTTP status retries. Builder,
-//! certificate validation, and other unrecognized errors are not retried.
-//! It also transparently retries failures where the server indicates that it did not
-//! process the request.
+//! A `Client` uses [`standard()`] retry behavior by default. It separates
+//! evidence about the failure from whether the request can be repeated:
 //!
-//! The standard policy makes at most three total attempts, uses exponential
-//! backoff with jitter, honors `Retry-After`, and includes a per-host retry
-//! budget. Providing a specific retry policy replaces the entire standard
-//! policy. Use [`never()`] to disable all retries.
+//! - If the protocol confirms the request was not processed, any method can
+//!   retry immediately without spending the retry budget.
+//! - If processing is unknown, a temporary transport interruption or HTTP
+//!   429/503 response can retry only for an idempotent method or a request
+//!   with an `Idempotency-Key`. These retries use backoff and the retry budget.
+//! - Other failures, including builder and certificate-validation errors,
+//!   do not retry. A timeout is not evidence that a request was unprocessed.
+//!
+//! An idempotency key is the caller's declaration that the server supports
+//! deduplication for this request. Custom classifiers can override the standard
+//! conditions; their caller is responsible for deciding whether replay is safe.
+//!
+//! Every retry requires a replayable body and an in-scope request, and respects
+//! the shared attempt limit and request deadline. The standard limit is three
+//! total attempts. Backoff is exponential with jitter and honors `Retry-After`.
+//! Providing a specific retry policy replaces the entire standard policy.
+//! Use [`never()`] to disable all retries.
 //!
 //! HTTP response status retries can be added to a policy with
 //! [`Builder::retry_on_status()`] or [`Builder::retry_on_statuses()`].
@@ -80,7 +86,7 @@ pub struct Builder {
     budget: Option<f32>,
     classifier: classify::Classifier,
     max_retries_per_request: u32,
-    retry_transient_transport_errors: bool,
+    retry_unprocessed_requests: bool,
     scope: scope::Scoped,
 }
 
@@ -91,12 +97,12 @@ pub(crate) struct Policy {
     backoff: backoff::Backoff,
     budget: Option<budget::Budgets>,
     classifier: classify::Classifier,
-    // Safe transport retries are immediate, so they don't advance backoff.
-    application_retry_cnt: u32,
+    // Confirmed unprocessed requests retry immediately without advancing backoff.
+    backoff_retry_cnt: u32,
     max_retries_per_request: u32,
     // All retry kinds share this limit.
     total_retry_cnt: u32,
-    retry_transient_transport_errors: bool,
+    retry_unprocessed_requests: bool,
     scope: scope::Scoped,
 }
 
@@ -109,15 +115,12 @@ pub(crate) struct Deadline(pub(crate) Instant);
 
 /// Create the standard retry policy used by a `Client` by default.
 ///
-/// This retries `429 Too Many Requests` and `503 Service Unavailable`
-/// responses for idempotent requests, or requests with an `Idempotency-Key`
-/// header. It also retries safe transient transport failures.
-/// GET/HEAD transient transport failures use backoff and the retry budget;
-/// protocol failures known not to have been processed retry immediately.
+/// Retries temporary failures for repeatable requests, and confirmed
+/// unprocessed requests for any method. See the module's default-policy rules.
 pub fn standard() -> Builder {
     let mut builder = Builder::with_scope(scope::Scoped::Unscoped);
     builder.classifier = classify::Classifier::Standard;
-    builder.retry_transient_transport_errors = true;
+    builder.retry_unprocessed_requests = true;
     builder
 }
 
@@ -180,7 +183,7 @@ impl Builder {
             budget: Some(0.2),
             classifier: classify::Classifier::Never,
             max_retries_per_request: 2, // on top of the original
-            retry_transient_transport_errors: false,
+            retry_unprocessed_requests: false,
             scope,
         }
     }
@@ -301,13 +304,13 @@ impl Builder {
         self
     }
 
-    /// Retry safe transient transport failures.
+    /// Retry protocol failures that confirm the request was not processed.
     ///
     /// These are failures where the server or protocol indicates that the
     /// request was not processed, so sending it again is safe. This behavior
     /// is included in [`standard()`].
     pub fn retry_on_transient_transport_errors(mut self) -> Self {
-        self.retry_transient_transport_errors = true;
+        self.retry_unprocessed_requests = true;
         self
     }
 
@@ -407,10 +410,10 @@ impl Builder {
             backoff: self.backoff,
             budget: self.budget.map(budget::Budgets::new),
             classifier: self.classifier,
-            application_retry_cnt: 0,
+            backoff_retry_cnt: 0,
             max_retries_per_request: self.max_retries_per_request,
             total_retry_cnt: 0,
-            retry_transient_transport_errors: self.retry_transient_transport_errors,
+            retry_unprocessed_requests: self.retry_unprocessed_requests,
             scope: self.scope,
         }
     }
@@ -428,15 +431,15 @@ type Req = http::Request<crate::async_impl::body::Body>;
 
 #[derive(Clone, Copy, Debug)]
 enum RetryKind {
-    Application,
-    TransientTransport,
+    Backoff,
+    Immediate,
 }
 
 impl Policy {
     /// How long to wait before the next attempt, or `None` if waiting that
     /// long would outlive the request anyway.
     fn delay<B>(&self, req: &Req, res: Option<&http::Response<B>>) -> Option<Duration> {
-        let backoff = self.backoff.delay(self.application_retry_cnt);
+        let backoff = self.backoff.delay(self.backoff_retry_cnt);
 
         // A server that told us when to come back knows better than we do,
         // but never let it talk us into retrying sooner than the backoff.
@@ -444,10 +447,6 @@ impl Policy {
             Some(retry_after) => backoff.max(retry_after),
             None => backoff,
         };
-
-        if delay.is_zero() {
-            return Some(delay);
-        }
 
         let room = match req.extensions().get::<Deadline>() {
             Some(deadline) => deadline.0.checked_duration_since(Instant::now()),
@@ -470,16 +469,13 @@ impl Policy {
         req: &Req,
         result: &crate::Result<http::Response<B>>,
     ) -> Option<RetryKind> {
-        if self.retry_transient_transport_errors
-            && result
-                .as_ref()
-                .err()
-                .map(is_retryable_error)
-                .unwrap_or(false)
+        let req_rep = classify::ReqRep::new(req, result);
+        if self.retry_unprocessed_requests
+            && req_rep.transport_failure == Some(TransportFailure::NotProcessed)
         {
-            Some(RetryKind::TransientTransport)
-        } else if let classify::Action::Retryable = self.classifier.classify(req, result) {
-            Some(RetryKind::Application)
+            Some(RetryKind::Immediate)
+        } else if let classify::Action::Retryable = self.classifier.classify(req_rep) {
+            Some(RetryKind::Backoff)
         } else {
             None
         }
@@ -494,6 +490,14 @@ impl<B> tower::retry::Policy<Req, http::Response<B>, crate::Error> for Policy {
         req: &mut Req,
         result: &mut crate::Result<http::Response<B>>,
     ) -> Option<Self::Future> {
+        if req
+            .extensions()
+            .get::<Deadline>()
+            .map(|deadline| deadline.0 <= Instant::now())
+            .unwrap_or(false)
+        {
+            return None;
+        }
         match self.retry_kind(req, result) {
             None => {
                 log::trace!("shouldn't retry!");
@@ -513,23 +517,23 @@ impl<B> tower::retry::Policy<Req, http::Response<B>, crate::Error> for Policy {
                 }
 
                 let delay = match kind {
-                    RetryKind::Application => self.delay(req, result.as_ref().ok())?,
-                    RetryKind::TransientTransport => Duration::ZERO,
+                    RetryKind::Backoff => self.delay(req, result.as_ref().ok())?,
+                    RetryKind::Immediate => Duration::ZERO,
                 };
 
                 let within_budget = match kind {
-                    RetryKind::Application => self
+                    RetryKind::Backoff => self
                         .budget
                         .as_ref()
                         .map(|b| b.get(req).withdraw())
                         .unwrap_or(true),
-                    RetryKind::TransientTransport => true,
+                    RetryKind::Immediate => true,
                 };
 
                 if within_budget {
                     self.total_retry_cnt += 1;
-                    if let RetryKind::Application = kind {
-                        self.application_retry_cnt += 1;
+                    if let RetryKind::Backoff = kind {
+                        self.backoff_retry_cnt += 1;
                     }
                     Some(Delay::new(delay))
                 } else {
@@ -596,18 +600,49 @@ impl std::fmt::Debug for Delay {
     }
 }
 
-fn is_retryable_read_error(err: &crate::Error) -> bool {
+/// What the transport tells us, independently of the request's method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransportFailure {
+    /// The protocol confirms that this request was not processed.
+    NotProcessed,
+    /// A temporary failure; the request may already have taken effect.
+    Interrupted,
+    /// No evidence that retrying will help.
+    Other,
+}
+
+/// Inspect the source chain once; wrappers do not determine retry safety.
+fn classify_transport_failure(err: &crate::Error) -> TransportFailure {
     use std::error::Error as _;
     use std::io::ErrorKind;
 
     if !err.is_request() {
-        return false;
+        return TransportFailure::Other;
     }
-    if err.is_timeout() {
-        return true;
-    }
+    let mut failure = TransportFailure::Other;
     let mut source = err.source();
     while let Some(cause) = source {
+        #[cfg(feature = "http2")]
+        if let Some(h2) = cause.downcast_ref::<h2::Error>() {
+            // h2 delivers remote GOAWAY errors to streams above the last processed ID.
+            let rejected = h2.is_remote()
+                && ((h2.is_go_away() && h2.reason() == Some(h2::Reason::NO_ERROR))
+                    || (h2.is_reset() && h2.reason() == Some(h2::Reason::REFUSED_STREAM)));
+            if rejected {
+                return TransportFailure::NotProcessed;
+            }
+        }
+        #[cfg(feature = "http3")]
+        if matches!(
+            cause.downcast_ref::<h3::error::ConnectionError>(),
+            Some(h3::error::ConnectionError::Timeout { .. })
+        ) {
+            // A timeout does not establish whether the server processed the request.
+            failure = TransportFailure::Interrupted;
+        }
+        if cause.is::<crate::error::TimedOut>() {
+            failure = TransportFailure::Interrupted;
+        }
         if let Some(io) = cause.downcast_ref::<std::io::Error>() {
             if matches!(
                 io.kind(),
@@ -619,64 +654,17 @@ fn is_retryable_read_error(err: &crate::Error) -> bool {
                     | ErrorKind::TimedOut
                     | ErrorKind::UnexpectedEof
             ) {
-                return true;
+                failure = TransportFailure::Interrupted;
             }
         }
         if let Some(hyper) = cause.downcast_ref::<hyper::Error>() {
-            if hyper.is_closed() || hyper.is_incomplete_message() {
-                return true;
+            if hyper.is_closed() || hyper.is_incomplete_message() || hyper.is_timeout() {
+                failure = TransportFailure::Interrupted;
             }
         }
         source = cause.source();
     }
-    false
-}
-
-fn is_retryable_error(err: &crate::Error) -> bool {
-    use std::error::Error as _;
-
-    // pop the reqwest::Error
-    let err = if let Some(err) = err.source() {
-        err
-    } else {
-        return false;
-    };
-    // pop the legacy::Error
-    let err = if let Some(err) = err.source() {
-        err
-    } else {
-        return false;
-    };
-
-    #[cfg(not(any(feature = "http3", feature = "http2")))]
-    let _err = err;
-
-    #[cfg(feature = "http3")]
-    if let Some(cause) = err.source() {
-        if let Some(err) = cause.downcast_ref::<h3::error::ConnectionError>() {
-            log::trace!("determining if HTTP/3 error {err} can be retried");
-            // TODO: Does h3 provide an API for checking the error?
-            return err.to_string().as_str() == "timeout";
-        }
-    }
-
-    #[cfg(feature = "http2")]
-    if let Some(cause) = err.source() {
-        if let Some(err) = cause.downcast_ref::<h2::Error>() {
-            // They sent us a graceful shutdown, try with a new connection!
-            if err.is_go_away() && err.is_remote() && err.reason() == Some(h2::Reason::NO_ERROR) {
-                return true;
-            }
-
-            // REFUSED_STREAM was sent from the server, which is safe to retry.
-            // https://www.rfc-editor.org/rfc/rfc9113.html#section-8.7-3.2
-            if err.is_reset() && err.is_remote() && err.reason() == Some(h2::Reason::REFUSED_STREAM)
-            {
-                return true;
-            }
-        }
-    }
-    false
+    failure
 }
 
 mod backoff {
@@ -969,28 +957,43 @@ mod classify {
     /// A request/response result to inspect for possible retries.
     ///
     /// This is passed to a `classify` function.
-    #[derive(Debug)]
-    pub struct ReqRep<'a>(&'a super::Req, Result<http::StatusCode, &'a crate::Error>);
+    #[derive(Clone, Copy, Debug)]
+    pub struct ReqRep<'a> {
+        request: &'a super::Req,
+        response: Result<http::StatusCode, &'a crate::Error>,
+        pub(super) transport_failure: Option<super::TransportFailure>,
+    }
 
-    impl ReqRep<'_> {
+    impl<'a> ReqRep<'a> {
+        pub(super) fn new<B>(
+            request: &'a super::Req,
+            result: &'a Result<http::Response<B>, crate::Error>,
+        ) -> Self {
+            Self {
+                request,
+                response: result.as_ref().map(|response| response.status()),
+                transport_failure: result.as_ref().err().map(super::classify_transport_failure),
+            }
+        }
+
         /// Access the request method.
         pub fn method(&self) -> &http::Method {
-            self.0.method()
+            self.request.method()
         }
 
         /// Access the request URI.
         pub fn uri(&self) -> &http::Uri {
-            self.0.uri()
+            self.request.uri()
         }
 
         /// Access the response status, if it did not error.
         pub fn status(&self) -> Option<http::StatusCode> {
-            self.1.ok()
+            self.response.ok()
         }
 
         /// Access the error, if a response was not received.
         pub fn error(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            self.1.as_ref().err().map(|e| &**e as _)
+            self.response.as_ref().err().map(|e| &**e as _)
         }
 
         /// Classify this attempt as retryable.
@@ -1011,24 +1014,20 @@ mod classify {
                 .unwrap_or(false)
         }
 
+        /// Repetition has the same intended effect, even if the first attempt succeeded.
+        fn is_repeatable(&self) -> bool {
+            self.method().is_idempotent() || self.request.headers().contains_key("idempotency-key")
+        }
+
         fn is_standard_retry(&self) -> bool {
-            if matches!(*self.method(), http::Method::GET | http::Method::HEAD)
-                && self
-                    .1
-                    .as_ref()
-                    .err()
-                    .map(|err| super::is_retryable_read_error(err))
-                    .unwrap_or(false)
-            {
-                return true;
-            }
-            let transient_status = matches!(
-                self.status(),
-                Some(http::StatusCode::TOO_MANY_REQUESTS | http::StatusCode::SERVICE_UNAVAILABLE)
-            );
-            transient_status
-                && (self.method().is_idempotent()
-                    || self.0.headers().contains_key("idempotency-key"))
+            let temporary = match self.response {
+                Ok(status) => matches!(
+                    status,
+                    http::StatusCode::TOO_MANY_REQUESTS | http::StatusCode::SERVICE_UNAVAILABLE
+                ),
+                Err(_) => self.transport_failure == Some(super::TransportFailure::Interrupted),
+            };
+            temporary && self.is_repeatable()
         }
     }
 
@@ -1069,12 +1068,7 @@ mod classify {
             }
         }
 
-        pub(super) fn classify<B>(
-            &self,
-            req: &super::Req,
-            res: &Result<http::Response<B>, crate::Error>,
-        ) -> Action {
-            let req_rep = ReqRep(req, res.as_ref().map(|r| r.status()));
+        pub(super) fn classify(&self, req_rep: ReqRep<'_>) -> Action {
             match self {
                 Self::Never => Action::Success,
                 Self::Standard => {
@@ -1094,7 +1088,7 @@ mod classify {
                 Self::Dyn(c) => c.classify(req_rep),
                 Self::Any(classifiers) => {
                     for classifier in classifiers {
-                        if let Action::Retryable = classifier.classify(req, res) {
+                        if let Action::Retryable = classifier.classify(req_rep) {
                             return Action::Retryable;
                         }
                     }
@@ -1130,7 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_retries_read_transport_errors_with_backoff_and_budget() {
+    fn standard_retries_repeatable_requests_after_transport_interruptions() {
         use std::io::ErrorKind;
 
         let policy = standard().into_policy();
@@ -1146,17 +1140,28 @@ mod tests {
             // Check a nested source, as in a connector error wrapped by hyper.
             let error = crate::error::request(crate::error::request(std::io::Error::from(kind)));
             let result: crate::Result<http::Response<()>> = Err(error);
-            for method in [http::Method::GET, http::Method::HEAD] {
+            for method in [
+                http::Method::GET,
+                http::Method::HEAD,
+                http::Method::PUT,
+                http::Method::DELETE,
+                http::Method::OPTIONS,
+                http::Method::TRACE,
+            ] {
                 assert!(matches!(
                     policy.retry_kind(&request(method), &result),
-                    Some(RetryKind::Application)
+                    Some(RetryKind::Backoff)
                 ));
             }
-            for method in [http::Method::POST, http::Method::PUT, http::Method::DELETE] {
+            for method in [http::Method::POST, http::Method::PATCH] {
                 let mut req = request(method);
+                assert!(policy.retry_kind(&req, &result).is_none());
                 req.headers_mut()
                     .insert("idempotency-key", "key".parse().unwrap());
-                assert!(policy.retry_kind(&req, &result).is_none());
+                assert!(matches!(
+                    policy.retry_kind(&req, &result),
+                    Some(RetryKind::Backoff)
+                ));
             }
             for builder in [custom(), never()] {
                 assert!(builder
@@ -1194,7 +1199,7 @@ mod tests {
     }
 
     #[test]
-    fn read_transport_retries_respect_attempt_limit_and_deadline() {
+    fn retries_respect_attempt_limit_and_deadline_even_without_backoff() {
         use tower::retry::Policy as _;
 
         let mut policy = standard().no_budget().backoff(Duration::ZERO).into_policy();
@@ -1205,9 +1210,11 @@ mod tests {
         assert!(policy.retry(&mut req, &mut result).is_some());
         assert!(policy.retry(&mut req, &mut result).is_none());
 
-        let mut policy = standard().into_policy();
-        req.extensions_mut().insert(Deadline(Instant::now()));
-        assert!(policy.retry(&mut req, &mut result).is_none());
+        for backoff in [Duration::ZERO, Duration::from_millis(100)] {
+            let mut policy = standard().backoff(backoff).into_policy();
+            req.extensions_mut().insert(Deadline(Instant::now()));
+            assert!(policy.retry(&mut req, &mut result).is_none());
+        }
     }
 
     fn header(value: &str) -> http::HeaderMap {
