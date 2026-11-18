@@ -15,6 +15,15 @@ An ergonomic, batteries-included HTTP Client for Rust.
 - Cookie Store
 - WASM
 
+## Fork retry policy
+
+This fork enables the [standard retry policy](src/retry.rs) by default. It
+separates evidence that a request was unprocessed from temporary failures of
+repeatable requests. The policy documentation defines replay safety, backoff,
+budgets, and deadlines.
+Use `reqwest::retry::never()` to disable retries or `custom()` to replace the
+standard conditions.
+
 
 ## Example
 
