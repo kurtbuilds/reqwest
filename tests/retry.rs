@@ -17,7 +17,7 @@ async fn other_status_retries_are_opt_in() {
         async move {
             if cnt.fetch_add(1, Ordering::Relaxed) == 0 {
                 http::Response::builder()
-                    .status(http::StatusCode::BAD_GATEWAY)
+                    .status(http::StatusCode::NOT_IMPLEMENTED)
                     .body(Default::default())
                     .unwrap()
             } else {
@@ -35,7 +35,7 @@ async fn other_status_retries_are_opt_in() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), http::StatusCode::BAD_GATEWAY);
+    assert_eq!(resp.status(), http::StatusCode::NOT_IMPLEMENTED);
     assert_eq!(seen.load(Ordering::Relaxed), 1);
 }
 

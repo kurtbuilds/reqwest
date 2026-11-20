@@ -14,8 +14,8 @@
 //! - If the protocol confirms the request was not processed, any method can
 //!   retry immediately without spending the retry budget.
 //! - If processing is unknown, a temporary transport interruption or HTTP
-//!   429/503 response can retry only for an idempotent method or a request
-//!   with an `Idempotency-Key`. These retries use backoff and the retry budget.
+//!   408/429/500/502/503/504 response can retry only for an idempotent method
+//!   or a request with an `Idempotency-Key`. These retries use backoff and the retry budget.
 //! - Other failures, including builder and certificate-validation errors,
 //!   do not retry. A timeout is not evidence that a request was unprocessed.
 //!
@@ -1023,7 +1023,12 @@ mod classify {
             let temporary = match self.response {
                 Ok(status) => matches!(
                     status,
-                    http::StatusCode::TOO_MANY_REQUESTS | http::StatusCode::SERVICE_UNAVAILABLE
+                    http::StatusCode::REQUEST_TIMEOUT
+                        | http::StatusCode::TOO_MANY_REQUESTS
+                        | http::StatusCode::INTERNAL_SERVER_ERROR
+                        | http::StatusCode::BAD_GATEWAY
+                        | http::StatusCode::SERVICE_UNAVAILABLE
+                        | http::StatusCode::GATEWAY_TIMEOUT
                 ),
                 Err(_) => self.transport_failure == Some(super::TransportFailure::Interrupted),
             };

@@ -1468,7 +1468,7 @@ impl ClientBuilder {
     /// Set a request retry policy.
     ///
     /// The default [`standard`][crate::retry::standard()] policy retries
-    /// `429 Too Many Requests`, `503 Service Unavailable`, and safe transient
+    /// HTTP 408, 429, 500, 502, 503, and 504 responses, and safe transient
     /// transport failures. It makes at most three total attempts. Setting a
     /// policy here replaces the entire default policy.
     ///
